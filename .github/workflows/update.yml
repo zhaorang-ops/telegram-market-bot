@@ -34,7 +34,7 @@ jobs:
           USERNAMES_COLLECTION_ADDRESS: "EQCA14o1-VWhS2efqoh_9M1b_A9DtKTuoqfmkn83AbJzwnPi"
 
           # 这里填匿名号集合地址，支持完整链接或地址本体
-          NUMBERS_COLLECTION_ADDRESS: ""
+          NUMBERS_COLLECTION_ADDRESS: "EQCA14o1-VWhS2efqoh_9M1b_A9DtKTuoqfmkn83AbJzwnPi"
 
           TZ: "Asia/Shanghai"
           MAX_PAGES: "120"

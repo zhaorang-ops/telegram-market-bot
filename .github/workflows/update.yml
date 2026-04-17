@@ -39,7 +39,7 @@ jobs:
           TOP_N_EACH: "20"
           TOP_N_NUMBERS: "5"
           TZ: "Asia/Shanghai"
-          MAX_PAGES: "50"
+          MAX_PAGES: "300"
 
           # 如果你想固定 TON 美元汇率，可以取消下面这行注释
           # TON_USD_OVERRIDE: "7.95"

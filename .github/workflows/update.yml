@@ -1,4 +1,4 @@
-name: Update Telegram Message
+name: Update Telegram Messages
 
 on:
   workflow_dispatch:
@@ -27,20 +27,21 @@ jobs:
       - name: Run bot
         env:
           BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
-          CHAT_ID: ${{ secrets.YOUR_CHAT_ID }}
-          MESSAGE_ID: ${{ secrets.YOUR_MESSAGE_ID }}
           MARKETAPP_API_TOKEN: ${{ secrets.MARKETAPP_API_TOKEN }}
+
+          USERNAMES_CHAT_ID: ${{ secrets.USERNAMES_CHAT_ID }}
+          USERNAMES_MESSAGE_ID: ${{ secrets.USERNAMES_MESSAGE_ID }}
+
+          NUMBERS_CHAT_ID: ${{ secrets.NUMBERS_CHAT_ID }}
+          NUMBERS_MESSAGE_ID: ${{ secrets.NUMBERS_MESSAGE_ID }}
 
           USERNAMES_COLLECTION_ADDRESS: "EQCA14o1-VWhS2efqoh_9M1b_A9DtKTuoqfmkn83AbJzwnPi"
 
-          # 这里填匿名号集合地址，支持完整链接或地址本体
+          # 这里填匿名号 collection 链接或地址本体
           NUMBERS_COLLECTION_ADDRESS: "https://marketapp.ws/collection/EQAOQdwdw8kGftJCSFgOErM1mBjYPe4DBPq8-AhF6vr9si5N/"
 
           TZ: "Asia/Shanghai"
-          MAX_PAGES: "120"
-
-          # 第一次可先把 YOUR_MESSAGE_ID 设成 0
-          # 如果想固定 TON 汇率，可取消下一行注释
+          MAX_PAGES: "200"
           # TON_USD_OVERRIDE: "7.95"
 
         run: python bot.py

@@ -33,5 +33,5 @@ jobs:
           COLLECTION_ADDRESS: "EQCA14o1-VWhS2efqoh_9M1b_A9DtKTuoqfmkn83AbJzwnPi"
           TOP_N_EACH: "20"
           TZ: "Asia/Shanghai"
-          MAX_PAGES: "10"
+          MAX_PAGES: "20"
         run: python bot.py

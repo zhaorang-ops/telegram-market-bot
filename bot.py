@@ -63,6 +63,9 @@ USERNAMES_MESSAGE_ID = parse_message_id(os.environ.get("USERNAMES_MESSAGE_ID", "
 NUMBERS_CHAT_ID = os.environ["NUMBERS_CHAT_ID"].strip()
 NUMBERS_MESSAGE_ID = parse_message_id(os.environ.get("NUMBERS_MESSAGE_ID", "0"))
 
+PROMO_CHAT_ID = (os.environ.get("PROMO_CHAT_ID", "").strip() or NUMBERS_CHAT_ID)
+PROMO_MESSAGE_ID = parse_message_id(os.environ.get("PROMO_MESSAGE_ID", "0"))
+
 USERNAMES_5_URL = os.environ.get("USERNAMES_5_URL", "").strip()
 USERNAMES_6_URL = os.environ.get("USERNAMES_6_URL", "").strip()
 
@@ -94,6 +97,19 @@ NUMBER_ADD_USD = {
 
 USERNAME_RE = re.compile(r"^@?[A-Za-z0-9_]{4,32}$")
 NUMBER_RE = re.compile(r"^\+?\d[\d\s]{6,}$")
+
+PROMO_MESSAGE_HTML = """
+<tg-emoji emoji-id="5364125616801073577">✈️</tg-emoji>买飞机号联系客服，提供会员号直登协议号，1-11年老号
+<tg-emoji emoji-id="5447236223275910637">🤎</tg-emoji>机房自养飞机号<tg-emoji emoji-id="5415758949129404605">👉</tg-emoji><a href="https://t.me/xinpf/28">价格表3u-60u</a>
+
+<tg-emoji emoji-id="5226656353744862682">🛒</tg-emoji>｜租+888｜开会员买星星｜Trx兑换/笔数｜可以用下方机器人取货～
+<tg-emoji emoji-id="6084545344924813749">1️⃣</tg-emoji>3Trx能量笔数trx闪兑<tg-emoji emoji-id="5415758949129404605">👉</tg-emoji> @shenmi_bot
+<tg-emoji emoji-id="6084472459329800521">2️⃣</tg-emoji>租888号开会员买星星<tg-emoji emoji-id="5415758949129404605">👉</tg-emoji> @zuhao8bot
+
+官方多用户名可增加账号权重不易被封<tg-emoji emoji-id="5415758949129404605">👉</tg-emoji> <a href="https://t.me/xinpf/96">选用户名68u</a>
+典藏礼物nft价格表<tg-emoji emoji-id="5415758949129404605">👉</tg-emoji> <a href="https://t.me/xinpf/141">选礼物</a>
+<tg-emoji emoji-id="5220166546491459639">🔥</tg-emoji>招牌11年防注销老号，注册超过11年的飞机号，超级无敌螺旋盖亚聚变核能耐操。
+""".strip()
 
 
 def to_float(value, default=0.0):
@@ -709,6 +725,10 @@ def build_numbers_message(number_floor, ton_usd_rate):
     return "\n".join(lines)
 
 
+def build_promo_message_html():
+    return PROMO_MESSAGE_HTML
+
+
 async def telegram_api(method: str, payload=None):
     url = f"https://api.telegram.org/bot{BOT_TOKEN}/{method}"
     async with httpx.AsyncClient(timeout=30) as client:
@@ -729,12 +749,15 @@ async def verify_telegram_bot():
         raise RuntimeError(f"Telegram getMe failed: {data}")
 
 
-async def send_new_message(chat_id: str, text: str, label: str):
+async def send_new_message(chat_id: str, text: str, label: str, parse_mode=None):
     payload = {
         "chat_id": chat_id,
         "text": text,
         "disable_web_page_preview": True,
     }
+    if parse_mode:
+        payload["parse_mode"] = parse_mode
+
     data = await telegram_api("sendMessage", payload)
     if not data.get("ok"):
         raise RuntimeError(f"Telegram sendMessage failed for {label}: {data}")
@@ -745,7 +768,7 @@ async def send_new_message(chat_id: str, text: str, label: str):
     return new_message_id
 
 
-async def edit_existing_message(chat_id: str, message_id, text: str, label: str):
+async def edit_existing_message(chat_id: str, message_id, text: str, label: str, parse_mode=None):
     if not message_id:
         return False
 
@@ -755,6 +778,8 @@ async def edit_existing_message(chat_id: str, message_id, text: str, label: str)
         "text": text,
         "disable_web_page_preview": True,
     }
+    if parse_mode:
+        payload["parse_mode"] = parse_mode
 
     data = await telegram_api("editMessageText", payload)
 
@@ -773,12 +798,12 @@ async def edit_existing_message(chat_id: str, message_id, text: str, label: str)
     raise RuntimeError(f"Telegram edit failed for {label}: {data}")
 
 
-async def upsert_message(chat_id: str, message_id, text: str, label: str):
-    edited = await edit_existing_message(chat_id, message_id, text, label)
+async def upsert_message(chat_id: str, message_id, text: str, label: str, parse_mode=None):
+    edited = await edit_existing_message(chat_id, message_id, text, label, parse_mode=parse_mode)
     if edited:
         return
 
-    new_message_id = await send_new_message(chat_id, text, label)
+    new_message_id = await send_new_message(chat_id, text, label, parse_mode=parse_mode)
     print(f"IMPORTANT: Update {label} secret to:", new_message_id)
 
 
@@ -802,6 +827,7 @@ async def main():
 
     usernames_text = build_usernames_message(section_5, section_6, ton_usd_rate)
     numbers_text = build_numbers_message(number_floor, ton_usd_rate) if NUMBERS_COLLECTION_ADDRESS else None
+    promo_text = build_promo_message_html()
 
     await verify_telegram_bot()
 
@@ -819,6 +845,14 @@ async def main():
             numbers_text,
             "NUMBERS_MESSAGE_ID",
         )
+
+    await upsert_message(
+        PROMO_CHAT_ID,
+        PROMO_MESSAGE_ID,
+        promo_text,
+        "PROMO_MESSAGE_ID",
+        parse_mode="HTML",
+    )
 
 
 if __name__ == "__main__":

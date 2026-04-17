@@ -102,26 +102,19 @@ PROMO_BUTTON_TEXT = "联系客服"
 PROMO_BUTTON_URL = "https://t.me/daimei1"
 
 PROMO_MESSAGE_HTML = """
-<tg-emoji emoji-id="5364125616801073577">✈️</tg-emoji>买飞机号联系客服，提供会员号直登协议号，1-11年老号~
-<tg-emoji emoji-id="5415758949129404605">👉</tg-emoji><a href="https://t.me/xinpf/28"> 价格表3u-60u</a><tg-emoji emoji-id="5447236223275910637">🤎</tg-emoji>机房自养飞机号
-<tg-emoji emoji-id="5415758949129404605">👉</tg-emoji> <a href="https://t.me/xinpf/141">选典藏礼物</a>
-<tg-emoji emoji-id="5415758949129404605">👉</tg-emoji> <a href="https://t.me/xinpf/96">选典藏多用户名实时更新</a>
+<tg-emoji emoji-id="5364125616801073577">✈️</tg-emoji>买飞机号联系客服，提供会员号直登协议号，1-11年老号
+<tg-emoji emoji-id="5447236223275910637">🤎</tg-emoji>机房自养飞机号<tg-emoji emoji-id="5415758949129404605">👉</tg-emoji><a href="https://t.me/xinpf/28">价格表3u-60u</a>
 
-<tg-emoji emoji-id="5226656353744862682">🛒</tg-emoji>租+888｜开会员买星星｜Trx兑换/笔数｜可以用下方机器人取货～
-<tg-emoji emoji-id="6084545344924813749">1️⃣</tg-emoji>能量/TRX/闪兑机器人<tg-emoji emoji-id="5415758949129404605">👉</tg-emoji> @shenmi_bot
+<tg-emoji emoji-id="5226656353744862682">🛒</tg-emoji>｜租+888｜开会员买星星｜Trx兑换/笔数｜可以用下方机器人取货～
+<tg-emoji emoji-id="6084545344924813749">1️⃣</tg-emoji>3Trx能量笔数trx闪兑<tg-emoji emoji-id="5415758949129404605">👉</tg-emoji> @shenmi_bot
 <tg-emoji emoji-id="6084472459329800521">2️⃣</tg-emoji>租888号开会员买星星<tg-emoji emoji-id="5415758949129404605">👉</tg-emoji> @zuhao8bot
 
-官方多用户名可和礼物增加账号权重不易被封<tg-emoji emoji-id="5220166546491459639">🔥</tg-emoji>招牌11年防注销老号，注册超过11年的飞机号，超级无敌螺旋盖亚聚变核能耐操。
+官方多用户名可增加账号权重不易被封<tg-emoji emoji-id="5415758949129404605">👉</tg-emoji> <a href="https://t.me/xinpf/96">选用户名68u</a>
+典藏礼物nft价格表<tg-emoji emoji-id="5415758949129404605">👉</tg-emoji> <a href="https://t.me/xinpf/141">选礼物</a>
+<tg-emoji emoji-id="5220166546491459639">🔥</tg-emoji>招牌11年防注销老号，注册超过11年的飞机号，超级无敌螺旋盖亚聚变核能耐操。
 """.strip()
 
-def html_escape(text: str) -> str:
-    return (
-        str(text)
-        .replace("&", "&amp;")
-        .replace("<", "&lt;")
-        .replace(">", "&gt;")
-    )
-    
+
 def build_promo_reply_markup():
     return {
         "inline_keyboard": [
@@ -702,40 +695,50 @@ def usd_after_add(ton_price: float, ton_usd_rate: float, add_usd: float) -> floa
 
 def build_usernames_message(section_5, section_6, ton_usd_rate):
     now_str = datetime.now(TZ).strftime("%Y-%m-%d %H:%M:%S")
+    lines = ["用户名价格实时更新：", ""]
 
-    left_title = "【5位用户名】"
-    right_title = "【6位用户名】"
-
-    rows = max(len(section_5), len(section_6))
-    left_width = 24
-    right_width = 24
-
-    lines = []
-    lines.append("用户名价格实时更新：")
-    lines.append("")
-    lines.append(f"{left_title:<{left_width}}{right_title:<{right_width}}")
-    lines.append(f"{'-' * 12:<{left_width}}{'-' * 12:<{right_width}}")
-
-    for i in range(rows):
-        left_text = ""
-        right_text = ""
-
-        if i < len(section_5):
-            item = section_5[i]
+    lines.append("【5位用户名】")
+    if not section_5:
+        lines.append("暂无数据")
+    else:
+        for item in section_5:
             usd_val = usd_after_add(item["ton_price"], ton_usd_rate, USERNAME_ADD_USD[5])
-            left_text = f"{item['name']} ${usd_val:.2f}"
+            lines.append(f"{item['name']}  ${usd_val:.2f}")
+    lines.append("")
 
-        if i < len(section_6):
-            item = section_6[i]
+    lines.append("【6位用户名】")
+    if not section_6:
+        lines.append("暂无数据")
+    else:
+        for item in section_6:
             usd_val = usd_after_add(item["ton_price"], ton_usd_rate, USERNAME_ADD_USD[6])
-            right_text = f"{item['name']} ${usd_val:.2f}"
+            lines.append(f"{item['name']}  ${usd_val:.2f}")
+    lines.append("")
+    lines.append(f"更新时间：{now_str}")
+    return "\n".join(lines)
 
-        lines.append(f"{left_text:<{left_width}}{right_text:<{right_width}}")
+
+def build_numbers_message(number_floor, ton_usd_rate):
+    now_str = datetime.now(TZ).strftime("%Y-%m-%d %H:%M:%S")
+    lines = ["📱【888】地板价"]
+
+    item = number_floor.get("has4")
+    if item:
+        usd_val = usd_after_add(item["ton_price"], ton_usd_rate, NUMBER_ADD_USD["has4"])
+        lines.append(f"【含4正常】 {item['name']} - ${usd_val:.2f}")
+    else:
+        lines.append("【含4正常】 暂无数据")
+
+    item = number_floor.get("no4")
+    if item:
+        usd_val = usd_after_add(item["ton_price"], ton_usd_rate, NUMBER_ADD_USD["no4"])
+        lines.append(f"【无4正常】 {item['name']} - ${usd_val:.2f}")
+    else:
+        lines.append("【无4正常】 暂无数据")
 
     lines.append("")
     lines.append(f"更新时间：{now_str}")
-
-    return "<pre>" + html_escape("\n".join(lines)) + "</pre>"
+    return "\n".join(lines)
 
 
 def build_promo_message_html():
@@ -863,11 +866,10 @@ async def main():
     await verify_telegram_bot()
 
     await upsert_message(
-    USERNAMES_CHAT_ID,
-    USERNAMES_MESSAGE_ID,
-    usernames_text,
-    "USERNAMES_MESSAGE_ID",
-    parse_mode="HTML",
+        USERNAMES_CHAT_ID,
+        USERNAMES_MESSAGE_ID,
+        usernames_text,
+        "USERNAMES_MESSAGE_ID",
     )
 
     if numbers_text:

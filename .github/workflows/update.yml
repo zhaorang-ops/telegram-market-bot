@@ -34,7 +34,7 @@ jobs:
           USERNAMES_COLLECTION_ADDRESS: "EQCA14o1-VWhS2efqoh_9M1b_A9DtKTuoqfmkn83AbJzwnPi"
 
           # 这里替换成匿名号集合页面 URL 里的地址；没有就先留空
-          NUMBERS_COLLECTION_ADDRESS: "https://marketapp.ws/collection/EQAOQdwdw8kGftJCSFgOErM1mBjYPe4DBPq8-AhF6vr9si5N/"
+          NUMBERS_COLLECTION_ADDRESS: "EQAOQdwdw8kGftJCSFgOErM1mBjYPe4DBPq8-AhF6vr9si5N"
 
           TOP_N_EACH: "20"
           TOP_N_NUMBERS: "5"

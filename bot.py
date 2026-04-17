@@ -713,7 +713,7 @@ def build_usernames_message(section_5, section_6, ton_usd_rate):
     right_width = 26
 
     lines = []
-    lines.append("用户名价格实时更新：")
+    lines.append("多用户名价格实时更新：")
     lines.append("")
     lines.append(f"{left_title:<{left_width}}{right_title:<{right_width}}")
     lines.append(f"{'-' * 12:<{left_width}}{'-' * 12:<{right_width}}")
@@ -735,14 +735,14 @@ def build_usernames_message(section_5, section_6, ton_usd_rate):
         lines.append(f"{left_text:<{left_width}}{right_text:<{right_width}}")
 
     lines.append("")
-    lines.append(f"更新时间：{now_str}")
+    lines.append(f"更多用户名咨询客服，更新时间：{now_str}")
 
     return "<pre>" + html_escape("\n".join(lines)) + "</pre>"
 
 
 def build_numbers_message(number_floor, ton_usd_rate):
     now_str = datetime.now(TZ).strftime("%Y-%m-%d %H:%M:%S")
-    lines = ["📱【888】地板价"]
+    lines = ["📱【官方888号】地板价"]
 
     item = number_floor.get("has4")
     if item:

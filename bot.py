@@ -2,6 +2,7 @@ import asyncio
 import os
 import re
 from datetime import datetime
+from urllib.parse import urlparse, parse_qs
 from zoneinfo import ZoneInfo
 
 import httpx
@@ -27,6 +28,32 @@ def parse_message_id(value: str):
     return None
 
 
+def parse_marketapp_url(url: str):
+    url = (url or "").strip()
+    if not url:
+        return {"collection_address": "", "length": None}
+
+    collection_address = normalize_collection_address(url)
+
+    length_value = None
+    try:
+        parsed = urlparse(url)
+        qs = parse_qs(parsed.query)
+        attrs = qs.get("attrs", [])
+        for attr in attrs:
+            m = re.search(r"Length~(\d+)", attr)
+            if m:
+                length_value = int(m.group(1))
+                break
+    except Exception:
+        pass
+
+    return {
+        "collection_address": collection_address,
+        "length": length_value,
+    }
+
+
 BOT_TOKEN = os.environ["BOT_TOKEN"].strip()
 MARKETAPP_API_TOKEN = os.environ["MARKETAPP_API_TOKEN"].strip()
 
@@ -36,11 +63,16 @@ USERNAMES_MESSAGE_ID = parse_message_id(os.environ.get("USERNAMES_MESSAGE_ID", "
 NUMBERS_CHAT_ID = os.environ["NUMBERS_CHAT_ID"].strip()
 NUMBERS_MESSAGE_ID = parse_message_id(os.environ.get("NUMBERS_MESSAGE_ID", "0"))
 
-USERNAMES_COLLECTION_ADDRESS = normalize_collection_address(
-    os.environ.get(
-        "USERNAMES_COLLECTION_ADDRESS",
-        "EQCA14o1-VWhS2efqoh_9M1b_A9DtKTuoqfmkn83AbJzwnPi",
-    )
+USERNAMES_5_URL = os.environ.get("USERNAMES_5_URL", "").strip()
+USERNAMES_6_URL = os.environ.get("USERNAMES_6_URL", "").strip()
+
+USERNAMES_5_INFO = parse_marketapp_url(USERNAMES_5_URL)
+USERNAMES_6_INFO = parse_marketapp_url(USERNAMES_6_URL)
+
+USERNAMES_COLLECTION_ADDRESS = (
+    USERNAMES_5_INFO["collection_address"]
+    or USERNAMES_6_INFO["collection_address"]
+    or "EQCA14o1-VWhS2efqoh_9M1b_A9DtKTuoqfmkn83AbJzwnPi"
 )
 
 NUMBERS_COLLECTION_ADDRESS = normalize_collection_address(
@@ -367,8 +399,7 @@ async def fetch_ton_usd_rate():
             resp.raise_for_status()
             data = resp.json()
             return float(data["the-open-network"]["usd"])
-    except Exception as e:
-        print("DEBUG TON USD FETCH FAILED:", repr(e))
+    except Exception:
         return 0.0
 
 
@@ -387,7 +418,7 @@ async def fetch_collection_items(collection_address: str, mode: str):
     no_new_pages = 0
 
     async with httpx.AsyncClient(timeout=30) as client:
-        for page_no in range(1, MAX_PAGES + 1):
+        for _ in range(1, MAX_PAGES + 1):
             params = {
                 "limit": 100,
                 "filter_by": "onsale",
@@ -396,18 +427,14 @@ async def fetch_collection_items(collection_address: str, mode: str):
                 params["cursor"] = cursor
 
             resp = await client.get(api_url, headers=headers, params=params)
-            print(f"DEBUG {mode.upper()} PAGE {page_no} STATUS:", resp.status_code)
 
             if resp.status_code == 400:
                 body_text = resp.text[:5000]
-                print(f"DEBUG {mode.upper()} ERROR BODY:", body_text)
                 if "Invalid cursor format" in body_text:
-                    print(f"DEBUG {mode.upper()} STOP: invalid cursor reached")
                     break
                 resp.raise_for_status()
 
             if resp.status_code >= 400:
-                print(f"DEBUG {mode.upper()} ERROR BODY:", resp.text[:5000])
                 resp.raise_for_status()
 
             payload = resp.json()
@@ -691,23 +718,15 @@ async def telegram_api(method: str, payload=None):
             resp = await client.post(url, json=payload)
 
     try:
-        data = resp.json()
+        return resp.json()
     except Exception:
         raise RuntimeError(f"Telegram {method} failed: HTTP {resp.status_code}, body={resp.text[:500]}")
-
-    return data
 
 
 async def verify_telegram_bot():
     data = await telegram_api("getMe")
     if not data.get("ok"):
         raise RuntimeError(f"Telegram getMe failed: {data}")
-
-    result = data.get("result", {})
-    print("DEBUG TELEGRAM BOT:", {
-        "id": result.get("id"),
-        "username": result.get("username"),
-    })
 
 
 async def send_new_message(chat_id: str, text: str, label: str):
@@ -726,7 +745,7 @@ async def send_new_message(chat_id: str, text: str, label: str):
     return new_message_id
 
 
-async def edit_existing_message(chat_id: str, message_id: int | None, text: str, label: str):
+async def edit_existing_message(chat_id: str, message_id, text: str, label: str):
     if not message_id:
         return False
 
@@ -740,17 +759,13 @@ async def edit_existing_message(chat_id: str, message_id: int | None, text: str,
     data = await telegram_api("editMessageText", payload)
 
     if data.get("ok"):
-        print(f"DEBUG TELEGRAM EDIT [{label}]: success")
         return True
 
     desc = str(data.get("description", "")).lower()
     error_code = data.get("error_code")
 
     if "message is not modified" in desc:
-        print(f"DEBUG TELEGRAM EDIT [{label}]: unchanged")
         return True
-
-    print(f"DEBUG TELEGRAM EDIT FAILED [{label}]:", data)
 
     if error_code in {400, 404}:
         return False
@@ -758,13 +773,13 @@ async def edit_existing_message(chat_id: str, message_id: int | None, text: str,
     raise RuntimeError(f"Telegram edit failed for {label}: {data}")
 
 
-async def upsert_message(chat_id: str, message_id: int | None, text: str, label: str):
+async def upsert_message(chat_id: str, message_id, text: str, label: str):
     edited = await edit_existing_message(chat_id, message_id, text, label)
     if edited:
         return
 
     new_message_id = await send_new_message(chat_id, text, label)
-    print(f"IMPORTANT: Update {label} message id secret to:", new_message_id)
+    print(f"IMPORTANT: Update {label} secret to:", new_message_id)
 
 
 async def main():
@@ -787,13 +802,6 @@ async def main():
 
     usernames_text = build_usernames_message(section_5, section_6, ton_usd_rate)
     numbers_text = build_numbers_message(number_floor, ton_usd_rate) if NUMBERS_COLLECTION_ADDRESS else None
-
-    print("DEBUG USERNAMES MESSAGE PREVIEW:")
-    print(usernames_text[:3000])
-
-    if numbers_text:
-        print("DEBUG NUMBERS MESSAGE PREVIEW:")
-        print(numbers_text[:3000])
 
     await verify_telegram_bot()
 

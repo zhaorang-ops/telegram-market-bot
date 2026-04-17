@@ -30,8 +30,18 @@ jobs:
           CHAT_ID: ${{ secrets.YOUR_CHAT_ID }}
           MESSAGE_ID: ${{ secrets.YOUR_MESSAGE_ID }}
           MARKETAPP_API_TOKEN: ${{ secrets.MARKETAPP_API_TOKEN }}
-          COLLECTION_ADDRESS: "EQCA14o1-VWhS2efqoh_9M1b_A9DtKTuoqfmkn83AbJzwnPi"
+
+          USERNAMES_COLLECTION_ADDRESS: "EQCA14o1-VWhS2efqoh_9M1b_A9DtKTuoqfmkn83AbJzwnPi"
+
+          # 这里替换成匿名号集合页面 URL 里的地址；没有就先留空
+          NUMBERS_COLLECTION_ADDRESS: "https://marketapp.ws/collection/EQAOQdwdw8kGftJCSFgOErM1mBjYPe4DBPq8-AhF6vr9si5N/"
+
           TOP_N_EACH: "20"
+          TOP_N_NUMBERS: "5"
           TZ: "Asia/Shanghai"
           MAX_PAGES: "50"
+
+          # 如果你想固定 TON 美元汇率，可以取消下面这行注释
+          # TON_USD_OVERRIDE: "7.95"
+
         run: python bot.py

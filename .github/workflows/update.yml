@@ -32,6 +32,7 @@ jobs:
           CHAT_ID: ${{ secrets.YOUR_CHAT_ID }}
           MESSAGE_ID: ${{ secrets.YOUR_MESSAGE_ID }}
           MARKET_URL: ${{ secrets.MARKET_URL }}
+          MARKETAPP_API_TOKEN: ${{ secrets.MARKETAPP_API_TOKEN }}
           TOP_N: "15"
           TZ: "Asia/Shanghai"
         run: python bot.py

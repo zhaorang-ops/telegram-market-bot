@@ -1,0 +1,37 @@
+name: Update Telegram Message
+
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: "2/5 * * * *"
+      timezone: "Asia/Shanghai"
+
+jobs:
+  run:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v5
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+          playwright install --with-deps chromium
+
+      - name: Run bot
+        env:
+          BOT_TOKEN: ${{ secrets.BOT_TOKEN }}
+          CHAT_ID: ${{ secrets.CHAT_ID }}
+          MESSAGE_ID: ${{ secrets.MESSAGE_ID }}
+          MARKET_URL: ${{ secrets.MARKET_URL }}
+          TOP_N: "15"
+          TZ: "Asia/Shanghai"
+        run: python bot.py

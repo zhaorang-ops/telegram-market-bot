@@ -693,29 +693,51 @@ def usd_after_add(ton_price: float, ton_usd_rate: float, add_usd: float) -> floa
     return ton_price * ton_usd_rate + add_usd
 
 
+def html_escape(text: str) -> str:
+    return (
+        str(text)
+        .replace("&", "&amp;")
+        .replace("<", "&lt;")
+        .replace(">", "&gt;")
+    )
+
+
 def build_usernames_message(section_5, section_6, ton_usd_rate):
     now_str = datetime.now(TZ).strftime("%Y-%m-%d %H:%M:%S")
-    lines = ["用户名价格实时更新：", ""]
 
-    lines.append("【5位用户名】")
-    if not section_5:
-        lines.append("暂无数据")
-    else:
-        for item in section_5:
-            usd_val = usd_after_add(item["ton_price"], ton_usd_rate, USERNAME_ADD_USD[5])
-            lines.append(f"{item['name']}  ${usd_val:.2f}")
+    left_title = "【5位用户名】"
+    right_title = "【6位用户名】"
+
+    rows = max(len(section_5), len(section_6))
+    left_width = 26
+    right_width = 26
+
+    lines = []
+    lines.append("用户名价格实时更新：")
     lines.append("")
+    lines.append(f"{left_title:<{left_width}}{right_title:<{right_width}}")
+    lines.append(f"{'-' * 12:<{left_width}}{'-' * 12:<{right_width}}")
 
-    lines.append("【6位用户名】")
-    if not section_6:
-        lines.append("暂无数据")
-    else:
-        for item in section_6:
+    for i in range(rows):
+        left_text = ""
+        right_text = ""
+
+        if i < len(section_5):
+            item = section_5[i]
+            usd_val = usd_after_add(item["ton_price"], ton_usd_rate, USERNAME_ADD_USD[5])
+            left_text = f"{item['name']} ${usd_val:.2f}"
+
+        if i < len(section_6):
+            item = section_6[i]
             usd_val = usd_after_add(item["ton_price"], ton_usd_rate, USERNAME_ADD_USD[6])
-            lines.append(f"{item['name']}  ${usd_val:.2f}")
+            right_text = f"{item['name']} ${usd_val:.2f}"
+
+        lines.append(f"{left_text:<{left_width}}{right_text:<{right_width}}")
+
     lines.append("")
     lines.append(f"更新时间：{now_str}")
-    return "\n".join(lines)
+
+    return "<pre>" + html_escape("\n".join(lines)) + "</pre>"
 
 
 def build_numbers_message(number_floor, ton_usd_rate):
@@ -870,6 +892,7 @@ async def main():
         USERNAMES_MESSAGE_ID,
         usernames_text,
         "USERNAMES_MESSAGE_ID",
+        parse_mode="HTML",
     )
 
     if numbers_text:

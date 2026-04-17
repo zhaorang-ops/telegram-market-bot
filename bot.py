@@ -98,6 +98,9 @@ NUMBER_ADD_USD = {
 USERNAME_RE = re.compile(r"^@?[A-Za-z0-9_]{4,32}$")
 NUMBER_RE = re.compile(r"^\+?\d[\d\s]{6,}$")
 
+PROMO_BUTTON_TEXT = "联系客服"
+PROMO_BUTTON_URL = "https://t.me/daimei1"
+
 PROMO_MESSAGE_HTML = """
 <tg-emoji emoji-id="5364125616801073577">✈️</tg-emoji>买飞机号联系客服，提供会员号直登协议号，1-11年老号
 <tg-emoji emoji-id="5447236223275910637">🤎</tg-emoji>机房自养飞机号<tg-emoji emoji-id="5415758949129404605">👉</tg-emoji><a href="https://t.me/xinpf/28">价格表3u-60u</a>
@@ -110,6 +113,19 @@ PROMO_MESSAGE_HTML = """
 典藏礼物nft价格表<tg-emoji emoji-id="5415758949129404605">👉</tg-emoji> <a href="https://t.me/xinpf/141">选礼物</a>
 <tg-emoji emoji-id="5220166546491459639">🔥</tg-emoji>招牌11年防注销老号，注册超过11年的飞机号，超级无敌螺旋盖亚聚变核能耐操。
 """.strip()
+
+
+def build_promo_reply_markup():
+    return {
+        "inline_keyboard": [
+            [
+                {
+                    "text": PROMO_BUTTON_TEXT,
+                    "url": PROMO_BUTTON_URL,
+                }
+            ]
+        ]
+    }
 
 
 def to_float(value, default=0.0):
@@ -749,7 +765,7 @@ async def verify_telegram_bot():
         raise RuntimeError(f"Telegram getMe failed: {data}")
 
 
-async def send_new_message(chat_id: str, text: str, label: str, parse_mode=None):
+async def send_new_message(chat_id: str, text: str, label: str, parse_mode=None, reply_markup=None):
     payload = {
         "chat_id": chat_id,
         "text": text,
@@ -757,6 +773,8 @@ async def send_new_message(chat_id: str, text: str, label: str, parse_mode=None)
     }
     if parse_mode:
         payload["parse_mode"] = parse_mode
+    if reply_markup:
+        payload["reply_markup"] = reply_markup
 
     data = await telegram_api("sendMessage", payload)
     if not data.get("ok"):
@@ -768,7 +786,7 @@ async def send_new_message(chat_id: str, text: str, label: str, parse_mode=None)
     return new_message_id
 
 
-async def edit_existing_message(chat_id: str, message_id, text: str, label: str, parse_mode=None):
+async def edit_existing_message(chat_id: str, message_id, text: str, label: str, parse_mode=None, reply_markup=None):
     if not message_id:
         return False
 
@@ -780,6 +798,8 @@ async def edit_existing_message(chat_id: str, message_id, text: str, label: str,
     }
     if parse_mode:
         payload["parse_mode"] = parse_mode
+    if reply_markup:
+        payload["reply_markup"] = reply_markup
 
     data = await telegram_api("editMessageText", payload)
 
@@ -798,12 +818,25 @@ async def edit_existing_message(chat_id: str, message_id, text: str, label: str,
     raise RuntimeError(f"Telegram edit failed for {label}: {data}")
 
 
-async def upsert_message(chat_id: str, message_id, text: str, label: str, parse_mode=None):
-    edited = await edit_existing_message(chat_id, message_id, text, label, parse_mode=parse_mode)
+async def upsert_message(chat_id: str, message_id, text: str, label: str, parse_mode=None, reply_markup=None):
+    edited = await edit_existing_message(
+        chat_id,
+        message_id,
+        text,
+        label,
+        parse_mode=parse_mode,
+        reply_markup=reply_markup,
+    )
     if edited:
         return
 
-    new_message_id = await send_new_message(chat_id, text, label, parse_mode=parse_mode)
+    new_message_id = await send_new_message(
+        chat_id,
+        text,
+        label,
+        parse_mode=parse_mode,
+        reply_markup=reply_markup,
+    )
     print(f"IMPORTANT: Update {label} secret to:", new_message_id)
 
 
@@ -828,6 +861,7 @@ async def main():
     usernames_text = build_usernames_message(section_5, section_6, ton_usd_rate)
     numbers_text = build_numbers_message(number_floor, ton_usd_rate) if NUMBERS_COLLECTION_ADDRESS else None
     promo_text = build_promo_message_html()
+    promo_reply_markup = build_promo_reply_markup()
 
     await verify_telegram_bot()
 
@@ -852,6 +886,7 @@ async def main():
         promo_text,
         "PROMO_MESSAGE_ID",
         parse_mode="HTML",
+        reply_markup=promo_reply_markup,
     )
 
 

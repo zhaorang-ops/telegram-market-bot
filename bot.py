@@ -1,34 +1,21 @@
 import asyncio
+import json
 import os
-import re
 from datetime import datetime
 from zoneinfo import ZoneInfo
 
 import httpx
-from playwright.async_api import async_playwright
 
 BOT_TOKEN = os.environ["BOT_TOKEN"]
 CHAT_ID = os.environ["CHAT_ID"]
 MESSAGE_ID = int(os.environ["MESSAGE_ID"])
+MARKETAPP_API_TOKEN = os.environ["MARKETAPP_API_TOKEN"]
 
-URL = os.environ.get(
-    "MARKET_URL",
-    "https://marketapp.ws/collection/EQCA14o1-VWhS2efqoh_9M1b_A9DtKTuoqfmkn83AbJzwnPi/?tab=nfts&view=list&query=&sort_by=price_asc&filter_by=sale&market_filter_by=any&min_price=&max_price=&attrs=Length%7E4&attrs=Length%7E6&attrs=Length%7E5"
-)
+COLLECTION_ADDRESS = "EQCA14o1-VWhS2efqoh_9M1b_A9DtKTuoqfmkn83AbJzwnPi"
+API_URL = f"https://api.marketapp.ws/v1/nfts/collections/{COLLECTION_ADDRESS}/"
 
 TOP_N_EACH = 20
 TZ = ZoneInfo(os.environ.get("TZ", "Asia/Shanghai"))
-
-# 解析：用户名 + TON价格 + 美元价格
-INLINE_RE = re.compile(
-    r"([A-Za-z0-9_\.]{2,})\s+(?:On Sale\s+)?(\d+(?:\.\d+)?)\s+~?\$(\d+(?:\.\d+)?)"
-)
-
-SKIP_LINES = {
-    "Marketapp", "Collection Info", "Filters", "Apply", "Loading...",
-    "Telegram Usernames", "Address", "Owners", "Supply", "Royalty",
-    "Floor", "Top order", "Volume 7D", "Read more", "Navigation"
-}
 
 ADD_USD = {
     4: 1000,
@@ -37,134 +24,165 @@ ADD_USD = {
 }
 
 
-def clean_line(s: str) -> str:
-    return re.sub(r"\s+", " ", s or "").strip()
+def pick_first(d, keys, default=None):
+    for k in keys:
+        if isinstance(d, dict) and k in d and d[k] is not None:
+            return d[k]
+    return default
 
 
-def unique_keep_order(items):
+def normalize_username(value: str) -> str:
+    if not value:
+        return ""
+    value = str(value).strip()
+    if value.startswith("@"):
+        value = value[1:]
+    return value
+
+
+def to_float(v, default=0.0):
+    try:
+        return float(v)
+    except Exception:
+        return default
+
+
+def extract_items(payload):
+    """
+    尽量兼容不同返回结构：
+    - 直接是 list
+    - {"results": [...]}
+    - {"items": [...]}
+    - {"data": [...]}
+    - {"nfts": [...]}
+    """
+    if isinstance(payload, list):
+        raw_items = payload
+    elif isinstance(payload, dict):
+        raw_items = (
+            payload.get("results")
+            or payload.get("items")
+            or payload.get("data")
+            or payload.get("nfts")
+            or []
+        )
+    else:
+        raw_items = []
+
+    items = []
     seen = set()
-    out = []
-    for x in items:
-        key = (x["name"].lower(), round(x["ton_price"], 8), round(x["usd_price"], 2))
+
+    for raw in raw_items:
+        if not isinstance(raw, dict):
+            continue
+
+        name = normalize_username(
+            pick_first(
+                raw,
+                ["name", "username", "nft_name", "title", "telegram_username"],
+                "",
+            )
+        )
+
+        if not name:
+            continue
+
+        ton_price = to_float(
+            pick_first(
+                raw,
+                ["price", "ton_price", "sale_price", "listing_price", "price_ton"],
+                0,
+            )
+        )
+
+        usd_price = to_float(
+            pick_first(
+                raw,
+                ["price_usd", "usd_price", "sale_price_usd", "listing_price_usd"],
+                0,
+            )
+        )
+
+        status = str(
+            pick_first(raw, ["status", "sale_status", "market_status"], "")
+        ).lower()
+
+        is_on_sale = bool(
+            pick_first(raw, ["is_on_sale", "on_sale"], False)
+        ) or ("sale" in status)
+
+        key = (name.lower(), ton_price, usd_price)
         if key in seen:
             continue
         seen.add(key)
-        out.append(x)
-    return out
 
-
-def parse_body_text(text: str):
-    lines = [clean_line(x) for x in text.splitlines()]
-    lines = [x for x in lines if x and x not in SKIP_LINES]
-
-    items = []
-    for line in lines:
-        m = INLINE_RE.search(line)
-        if m:
-            items.append({
-                "name": m.group(1),
-                "ton_price": float(m.group(2)),
-                "usd_price": float(m.group(3)),
-            })
-
-    return unique_keep_order(items)
-
-
-async def extract_items_from_page(page):
-    await page.goto(URL, wait_until="networkidle", timeout=90000)
-    await page.wait_for_timeout(4000)
-
-    dom_items = await page.evaluate(
-        """
-        () => {
-          const clean = (s) => (s || "").replace(/\\s+/g, " ").trim();
-          const out = [];
-          const seen = new Set();
-
-          function getPrices(text) {
-            const m = text.match(/(?:On Sale\\s+)?(\\d+(?:\\.\\d+)?)\\s+~?\\$(\\d+(?:\\.\\d+)?)/);
-            if (!m) return null;
-            return {
-              ton_price: parseFloat(m[1]),
-              usd_price: parseFloat(m[2]),
-            };
-          }
-
-          const anchors = [...document.querySelectorAll('a')];
-          for (const a of anchors) {
-            const name = clean(a.textContent);
-            if (!/^[A-Za-z0-9_.]{2,}$/.test(name)) continue;
-            if (seen.has(name.toLowerCase())) continue;
-
-            let el = a;
-            let matchedText = "";
-            for (let i = 0; i < 8 && el; i++, el = el.parentElement) {
-              const txt = clean(el.innerText);
-              if (!txt || !txt.includes(name)) continue;
-              if (/\\d+(?:\\.\\d+)?\\s+~?\\$\\d+(?:\\.\\d+)?/.test(txt) || /On Sale/.test(txt)) {
-                matchedText = txt;
-                break;
-              }
+        items.append(
+            {
+                "name": name,
+                "name_len": len(name),
+                "ton_price": ton_price,
+                "usd_price": usd_price,
+                "is_on_sale": is_on_sale,
+                "raw": raw,
             }
-
-            const prices = matchedText ? getPrices(matchedText) : null;
-            if (prices) {
-              out.push({
-                name,
-                ton_price: prices.ton_price,
-                usd_price: prices.usd_price
-              });
-              seen.add(name.toLowerCase());
-            }
-          }
-          return out;
-        }
-        """
-    )
-
-    dom_items = unique_keep_order(dom_items)
-    if dom_items:
-        return dom_items
-
-    body_text = await page.locator("body").inner_text()
-    return parse_body_text(body_text)
-
-
-def build_message(items):
-    now_str = datetime.now(TZ).strftime("%Y-%m-%d %H:%M:%S")
-
-    if not items:
-        return (
-            "用户名价格实时更新：\n\n"
-            "暂时没有解析到数据。\n"
-            f"更新时间：{now_str}"
         )
 
-    groups = {4: [], 5: [], 6: []}
+    return items
 
-    for item in items:
-        name_len = len(item["name"])
-        if name_len in groups:
-            groups[name_len].append(item)
 
-    for name_len in groups:
-        groups[name_len].sort(key=lambda x: x["ton_price"])
+async def fetch_group(length_value: int):
+    headers = {
+        "Authorization": MARKETAPP_API_TOKEN,
+        "Accept": "application/json",
+    }
+
+    # 这里的参数名是按你页面 URL 的筛选逻辑来写的，
+    # 实际是否完全一致，请以 Swagger 里该接口的参数定义为准。
+    params = {
+        "filter_by": "sale",
+        "sort_by": "price_asc",
+        "market_filter_by": "any",
+        "attrs": f"Length~{length_value}",
+    }
+
+    async with httpx.AsyncClient(timeout=30) as client:
+        r = await client.get(API_URL, headers=headers, params=params)
+        r.raise_for_status()
+        data = r.json()
+
+    items = extract_items(data)
+
+    # 再本地兜底过滤一次，避免接口返回混杂数据
+    items = [
+        x for x in items
+        if x["name_len"] == length_value and (x["is_on_sale"] or x["ton_price"] > 0)
+    ]
+
+    items.sort(key=lambda x: x["ton_price"])
+    return items[:TOP_N_EACH]
+
+
+def build_message(groups):
+    now_str = datetime.now(TZ).strftime("%Y-%m-%d %H:%M:%S")
 
     lines = ["用户名价格实时更新：", ""]
 
-    for name_len in [4, 5, 6]:
-        lines.append(f"【{name_len}位 前{TOP_N_EACH}个】")
-        current_items = groups[name_len][:TOP_N_EACH]
+    for length_value in [4, 5, 6]:
+        current_items = groups.get(length_value, [])
+        lines.append(f"【{length_value}位 前{TOP_N_EACH}个】")
 
         if not current_items:
             lines.append("暂无数据")
             lines.append("")
             continue
 
-        extra = ADD_USD[name_len]
+        extra = ADD_USD[length_value]
+
         for item in current_items:
             final_usd = item["usd_price"] + extra
-            lines.append(f"@{item['name']}  ${final_usd:.2f}")
+            lines.append(
+                f"@{item['name']} 当前TON价格：{item['ton_price']:.2f} | ${final_usd:.2f}"
+            )
 
         lines.append("")
 
@@ -180,25 +198,26 @@ async def edit_message(text: str):
         "text": text,
         "disable_web_page_preview": True,
     }
+
     async with httpx.AsyncClient(timeout=30) as client:
         r = await client.post(api, json=payload)
         data = r.json()
-        if not data.get("ok"):
-            desc = str(data.get("description", ""))
-            if "message is not modified" in desc.lower():
-                print("Telegram message unchanged.")
-                return
-            raise RuntimeError(f"Telegram edit failed: {data}")
+
+    if not data.get("ok"):
+        desc = str(data.get("description", ""))
+        if "message is not modified" in desc.lower():
+            print("Telegram message unchanged.")
+            return
+        raise RuntimeError(f"Telegram edit failed: {data}")
 
 
 async def main():
-    async with async_playwright() as p:
-        browser = await p.chromium.launch(headless=True)
-        page = await browser.new_page()
-        items = await extract_items_from_page(page)
-        text = build_message(items)
-        await edit_message(text)
-        await browser.close()
+    groups = {}
+    for length_value in [4, 5, 6]:
+        groups[length_value] = await fetch_group(length_value)
+
+    text = build_message(groups)
+    await edit_message(text)
 
 
 if __name__ == "__main__":

@@ -20,7 +20,7 @@ API_URL = f"https://api.marketapp.ws/v1/nfts/collections/{COLLECTION_ADDRESS}/"
 
 TZ = ZoneInfo(os.environ.get("TZ", "Asia/Shanghai"))
 TOP_N_EACH = int(os.environ.get("TOP_N_EACH", "20"))
-MAX_PAGES = int(os.environ.get("MAX_PAGES", "20"))
+MAX_PAGES = int(os.environ.get("MAX_PAGES", "50"))
 
 ADD_USD = {
     4: 1000.0,
@@ -34,6 +34,7 @@ USERNAME_RE = re.compile(r"^@?([A-Za-z0-9_]{4,32})$")
 def to_float(value, default=0.0):
     if value is None:
         return default
+
     if isinstance(value, (int, float)):
         return float(value)
 
@@ -68,10 +69,10 @@ def get_items_list(payload):
             return value
 
     for outer in ["data", "result"]:
-        if isinstance(payload.get(outer), dict):
-            inner = payload[outer]
+        outer_val = payload.get(outer)
+        if isinstance(outer_val, dict):
             for key in ["items", "results", "nfts", "assets"]:
-                value = inner.get(key)
+                value = outer_val.get(key)
                 if isinstance(value, list):
                     return value
 
@@ -118,13 +119,17 @@ def extract_username(raw: dict):
         score = 0
         if "username" in path_text:
             score += 100
+        if "telegram" in path_text:
+            score += 60
         if "metadata" in path_text:
-            score += 50
+            score += 40
         if path and path[-1].lower() == "name":
-            score += 30
+            score += 20
+
+        # 避免误取集合名
         if "collection" in path_text:
             score -= 100
-        if username.lower() == "telegramusernames":
+        if username.lower() in {"telegramusernames", "fragment", "marketapp"}:
             score -= 200
 
         candidates.append((score, username, path_text))
@@ -136,34 +141,29 @@ def extract_username(raw: dict):
     return candidates[0][1]
 
 
-def extract_price(raw: dict, kind="ton"):
-    preferred_paths = []
-
-    if kind == "ton":
-        preferred_paths = [
-            ("price_ton",),
-            ("ton_price",),
-            ("sale", "price_ton"),
-            ("order", "price_ton"),
-            ("listing", "price_ton"),
-            ("market", "price_ton"),
-            ("sale", "price"),
-            ("order", "price"),
-            ("listing", "price"),
-            ("market", "price"),
-            ("price",),
-            ("full_price",),
-        ]
-    else:
-        preferred_paths = [
-            ("price_usd",),
-            ("usd_price",),
-            ("sale", "price_usd"),
-            ("order", "price_usd"),
-            ("listing", "price_usd"),
-            ("market", "price_usd"),
-            ("usd",),
-        ]
+def extract_ton_price(raw: dict):
+    # 优先尝试常见字段
+    preferred_paths = [
+        ("full_price",),
+        ("price",),
+        ("price_ton",),
+        ("ton_price",),
+        ("sale", "full_price"),
+        ("sale", "price"),
+        ("sale", "price_ton"),
+        ("order", "full_price"),
+        ("order", "price"),
+        ("order", "price_ton"),
+        ("listing", "full_price"),
+        ("listing", "price"),
+        ("listing", "price_ton"),
+        ("market", "full_price"),
+        ("market", "price"),
+        ("market", "price_ton"),
+        ("nft_sale", "full_price"),
+        ("nft_sale", "price"),
+        ("nft_sale", "price_ton"),
+    ]
 
     for path in preferred_paths:
         cur = raw
@@ -175,38 +175,111 @@ def extract_price(raw: dict, kind="ton"):
             cur = cur[key]
         if ok:
             val = to_float(cur, default=None)
-            if val is not None:
+            if val is not None and val > 0:
                 return val
 
-    fallback = []
+    # 回退：扫描所有叶子节点，优先找带 ton / price / full_price 的数值
+    candidates = []
     for path, value in walk_leaves(raw):
         path_text = ".".join(path).lower()
-        if "price" not in path_text and kind not in path_text:
+
+        if not any(k in path_text for k in ["price", "ton", "full_price", "sale"]):
             continue
 
         num = to_float(value, default=None)
-        if num is None:
+        if num is None or num <= 0:
             continue
 
         score = 0
-        if kind == "ton":
-            if "ton" in path_text:
-                score += 100
-            if path_text.endswith("price"):
-                score += 20
-        else:
-            if "usd" in path_text:
-                score += 100
-            if path_text.endswith("price_usd"):
-                score += 20
+        if "full_price" in path_text:
+            score += 120
+        if "price_ton" in path_text:
+            score += 110
+        if path_text.endswith("price"):
+            score += 80
+        if "ton" in path_text:
+            score += 60
+        if "sale" in path_text or "listing" in path_text or "order" in path_text:
+            score += 40
+        if "usd" in path_text:
+            score -= 120
 
-        fallback.append((score, num, path_text))
+        candidates.append((score, num, path_text))
 
-    if not fallback:
+    if not candidates:
         return 0.0
 
-    fallback.sort(key=lambda x: (-x[0], x[1]))
-    return float(fallback[0][1])
+    candidates.sort(key=lambda x: (-x[0], x[1]))
+    return float(candidates[0][1])
+
+
+def extract_usd_price(raw: dict):
+    preferred_paths = [
+        ("price_usd",),
+        ("usd_price",),
+        ("sale", "price_usd"),
+        ("order", "price_usd"),
+        ("listing", "price_usd"),
+        ("market", "price_usd"),
+        ("nft_sale", "price_usd"),
+        ("usd",),
+    ]
+
+    for path in preferred_paths:
+        cur = raw
+        ok = True
+        for key in path:
+            if not isinstance(cur, dict) or key not in cur:
+                ok = False
+                break
+            cur = cur[key]
+        if ok:
+            val = to_float(cur, default=None)
+            if val is not None and val > 0:
+                return val
+
+    candidates = []
+    for path, value in walk_leaves(raw):
+        path_text = ".".join(path).lower()
+        if "usd" not in path_text:
+            continue
+
+        num = to_float(value, default=None)
+        if num is None or num <= 0:
+            continue
+
+        score = 0
+        if "price_usd" in path_text:
+            score += 120
+        if path_text.endswith("usd"):
+            score += 60
+
+        candidates.append((score, num, path_text))
+
+    if not candidates:
+        return 0.0
+
+    candidates.sort(key=lambda x: (-x[0], x[1]))
+    return float(candidates[0][1])
+
+
+def extract_banned(raw: dict):
+    # 官方文档没公开 banned 字段名，这里做兼容识别
+    for path, value in walk_leaves(raw):
+        path_text = ".".join(path).lower()
+
+        if "banned" in path_text or "ban" in path_text:
+            if isinstance(value, bool):
+                return value
+            if isinstance(value, str):
+                return value.strip().lower() in {"true", "1", "yes", "banned"}
+
+        if "status" in path_text and isinstance(value, str):
+            status = value.strip().lower()
+            if "banned" in status or "ban" == status:
+                return True
+
+    return False
 
 
 def extract_on_sale(raw: dict):
@@ -229,8 +302,9 @@ def parse_item(raw: dict):
     if not username:
         return None
 
-    ton_price = extract_price(raw, kind="ton")
-    usd_price = extract_price(raw, kind="usd")
+    ton_price = extract_ton_price(raw)
+    usd_price = extract_usd_price(raw)
+    is_banned = extract_banned(raw)
     on_sale = extract_on_sale(raw)
 
     return {
@@ -238,6 +312,7 @@ def parse_item(raw: dict):
         "name_len": len(username),
         "ton_price": ton_price,
         "usd_price": usd_price,
+        "is_banned": is_banned,
         "is_on_sale": on_sale,
         "raw": raw,
     }
@@ -257,6 +332,7 @@ async def fetch_all_items():
         for page_no in range(1, MAX_PAGES + 1):
             params = {
                 "limit": 100,
+                "filter_by": "onsale",
             }
             if cursor:
                 params["cursor"] = cursor
@@ -286,15 +362,19 @@ async def fetch_all_items():
                 if not item:
                     continue
 
-                key = (
-                    item["name"].lower(),
-                    round(item["ton_price"], 8),
-                    round(item["usd_price"], 2),
-                )
-                if key in seen:
-                    continue
-                seen.add(key)
-                all_items.append(item)
+                key = item["name"].lower()
+                old = next((x for x in all_items if x["name"].lower() == key), None)
+
+                # 同名只保留价格更合理的一条
+                if old is None:
+                    all_items.append(item)
+                    seen.add(key)
+                else:
+                    old_price = old["ton_price"] if old["ton_price"] > 0 else 10**18
+                    new_price = item["ton_price"] if item["ton_price"] > 0 else 10**18
+                    if new_price < old_price:
+                        all_items.remove(old)
+                        all_items.append(item)
 
             next_cursor = None
             if isinstance(payload, dict):
@@ -321,8 +401,7 @@ def build_groups(items):
         if item["name_len"] not in groups:
             continue
 
-        # 这个接口本身就是 collection NFTs on sale；
-        # 这里再做一次兜底过滤：有 on_sale=true 或有价格就算有效
+        # 这个接口默认就是 onsale；这里再用价格做兜底
         if item["is_on_sale"] is False and item["ton_price"] <= 0:
             continue
 
@@ -332,7 +411,7 @@ def build_groups(items):
         groups[length_value].sort(
             key=lambda x: (
                 x["ton_price"] <= 0,
-                x["ton_price"],
+                x["ton_price"] if x["ton_price"] > 0 else 10**18,
                 x["name"].lower(),
             )
         )
@@ -358,9 +437,14 @@ def build_message(groups):
         extra_usd = ADD_USD[length_value]
 
         for item in current_items:
-            adjusted_usd = item["usd_price"] + extra_usd
+            if item["usd_price"] > 0:
+                adjusted_usd = item["usd_price"] + extra_usd
+            else:
+                adjusted_usd = extra_usd
+
+            banned_tag = " [BANNED]" if item["is_banned"] else ""
             lines.append(
-                f"@{item['name']}  {item['ton_price']:.2f} TON  |  ${adjusted_usd:.2f}"
+                f"@{item['name']}{banned_tag}  {item['ton_price']:.2f} TON  |  ${adjusted_usd:.2f}"
             )
 
         lines.append("")
@@ -395,6 +479,17 @@ async def main():
     groups = build_groups(items)
 
     print("DEBUG GROUP COUNTS:", {k: len(v) for k, v in groups.items()})
+    print("DEBUG SAMPLE WITH PRICE:")
+    for x in items[:10]:
+        print(
+            {
+                "name": x["name"],
+                "len": x["name_len"],
+                "ton_price": x["ton_price"],
+                "usd_price": x["usd_price"],
+                "is_banned": x["is_banned"],
+            }
+        )
 
     text = build_message(groups)
     print("DEBUG FINAL MESSAGE PREVIEW:")

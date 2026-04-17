@@ -20,10 +20,11 @@ def normalize_collection_address(value: str) -> str:
     return value.strip()
 
 
-BOT_TOKEN = os.environ["BOT_TOKEN"]
-CHAT_ID = os.environ["CHAT_ID"]
-MESSAGE_ID = int(os.environ["MESSAGE_ID"])
-MARKETAPP_API_TOKEN = os.environ["MARKETAPP_API_TOKEN"]
+BOT_TOKEN = os.environ["BOT_TOKEN"].strip()
+CHAT_ID = os.environ["CHAT_ID"].strip()
+MESSAGE_ID_RAW = os.environ.get("MESSAGE_ID", "").strip()
+MESSAGE_ID = int(MESSAGE_ID_RAW) if MESSAGE_ID_RAW.isdigit() and int(MESSAGE_ID_RAW) > 0 else None
+MARKETAPP_API_TOKEN = os.environ["MARKETAPP_API_TOKEN"].strip()
 
 USERNAMES_COLLECTION_ADDRESS = normalize_collection_address(
     os.environ.get(
@@ -37,7 +38,6 @@ NUMBERS_COLLECTION_ADDRESS = normalize_collection_address(
 )
 
 TZ = ZoneInfo(os.environ.get("TZ", "Asia/Shanghai"))
-TOP_N_EACH = int(os.environ.get("TOP_N_EACH", "20"))
 MAX_PAGES = int(os.environ.get("MAX_PAGES", "120"))
 
 USERNAME_ADD_USD = {
@@ -681,8 +681,54 @@ def build_message(section_5, section_6, number_floor, ton_usd_rate):
     return "\n".join(lines)
 
 
-async def edit_message(text: str):
-    url = f"https://api.telegram.org/bot{BOT_TOKEN}/editMessageText"
+async def telegram_api(method: str, payload=None):
+    url = f"https://api.telegram.org/bot{BOT_TOKEN}/{method}"
+    async with httpx.AsyncClient(timeout=30) as client:
+        if payload is None:
+            resp = await client.get(url)
+        else:
+            resp = await client.post(url, json=payload)
+
+    try:
+        data = resp.json()
+    except Exception:
+        raise RuntimeError(f"Telegram {method} failed: HTTP {resp.status_code}, body={resp.text[:500]}")
+
+    return data
+
+
+async def verify_telegram_bot():
+    data = await telegram_api("getMe")
+    if not data.get("ok"):
+        raise RuntimeError(f"Telegram getMe failed: {data}")
+
+    result = data.get("result", {})
+    print("DEBUG TELEGRAM BOT:", {
+        "id": result.get("id"),
+        "username": result.get("username"),
+    })
+
+
+async def send_new_message(text: str):
+    payload = {
+        "chat_id": CHAT_ID,
+        "text": text,
+        "disable_web_page_preview": True,
+    }
+    data = await telegram_api("sendMessage", payload)
+    if not data.get("ok"):
+        raise RuntimeError(f"Telegram sendMessage failed: {data}")
+
+    result = data.get("result", {})
+    new_message_id = result.get("message_id")
+    print("DEBUG NEW MESSAGE ID:", new_message_id)
+    return new_message_id
+
+
+async def edit_existing_message(text: str):
+    if not MESSAGE_ID:
+        return False
+
     payload = {
         "chat_id": CHAT_ID,
         "message_id": MESSAGE_ID,
@@ -690,16 +736,34 @@ async def edit_message(text: str):
         "disable_web_page_preview": True,
     }
 
-    async with httpx.AsyncClient(timeout=30) as client:
-        resp = await client.post(url, json=payload)
-        data = resp.json()
+    data = await telegram_api("editMessageText", payload)
 
-    if not data.get("ok"):
-        desc = str(data.get("description", ""))
-        if "message is not modified" in desc.lower():
-            print("Telegram message unchanged.")
-            return
-        raise RuntimeError(f"Telegram edit failed: {data}")
+    if data.get("ok"):
+        print("DEBUG TELEGRAM EDIT: success")
+        return True
+
+    desc = str(data.get("description", "")).lower()
+    error_code = data.get("error_code")
+
+    if "message is not modified" in desc:
+        print("DEBUG TELEGRAM EDIT: unchanged")
+        return True
+
+    print("DEBUG TELEGRAM EDIT FAILED:", data)
+
+    if error_code in {400, 404}:
+        return False
+
+    raise RuntimeError(f"Telegram edit failed: {data}")
+
+
+async def upsert_message(text: str):
+    edited = await edit_existing_message(text)
+    if edited:
+        return
+
+    new_message_id = await send_new_message(text)
+    print("IMPORTANT: Update YOUR_MESSAGE_ID secret to:", new_message_id)
 
 
 async def main():
@@ -747,7 +811,8 @@ async def main():
     print("DEBUG FINAL MESSAGE PREVIEW:")
     print(text[:4000])
 
-    await edit_message(text)
+    await verify_telegram_bot()
+    await upsert_message(text)
 
 
 if __name__ == "__main__":

@@ -28,9 +28,9 @@ jobs:
 
       - name: Run bot
         env:
-          BOT_TOKEN: ${{ secrets.BOT_TOKEN }}
-          CHAT_ID: ${{ secrets.CHAT_ID }}
-          MESSAGE_ID: ${{ secrets.MESSAGE_ID }}
+          BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          CHAT_ID: ${{ secrets.YOUR_CHAT_ID }}
+          MESSAGE_ID: ${{ secrets.YOUR_MESSAGE_ID }}
           MARKET_URL: ${{ secrets.MARKET_URL }}
           TOP_N: "15"
           TZ: "Asia/Shanghai"

@@ -20,11 +20,21 @@ def normalize_collection_address(value: str) -> str:
     return value.strip()
 
 
+def parse_message_id(value: str):
+    value = (value or "").strip()
+    if value.isdigit() and int(value) > 0:
+        return int(value)
+    return None
+
+
 BOT_TOKEN = os.environ["BOT_TOKEN"].strip()
-CHAT_ID = os.environ["CHAT_ID"].strip()
-MESSAGE_ID_RAW = os.environ.get("MESSAGE_ID", "").strip()
-MESSAGE_ID = int(MESSAGE_ID_RAW) if MESSAGE_ID_RAW.isdigit() and int(MESSAGE_ID_RAW) > 0 else None
 MARKETAPP_API_TOKEN = os.environ["MARKETAPP_API_TOKEN"].strip()
+
+USERNAMES_CHAT_ID = os.environ["USERNAMES_CHAT_ID"].strip()
+USERNAMES_MESSAGE_ID = parse_message_id(os.environ.get("USERNAMES_MESSAGE_ID", "0"))
+
+NUMBERS_CHAT_ID = os.environ["NUMBERS_CHAT_ID"].strip()
+NUMBERS_MESSAGE_ID = parse_message_id(os.environ.get("NUMBERS_MESSAGE_ID", "0"))
 
 USERNAMES_COLLECTION_ADDRESS = normalize_collection_address(
     os.environ.get(
@@ -387,7 +397,6 @@ async def fetch_collection_items(collection_address: str, mode: str):
 
             resp = await client.get(api_url, headers=headers, params=params)
             print(f"DEBUG {mode.upper()} PAGE {page_no} STATUS:", resp.status_code)
-            print(f"DEBUG {mode.upper()} URL:", str(resp.request.url))
 
             if resp.status_code == 400:
                 body_text = resp.text[:5000]
@@ -403,14 +412,8 @@ async def fetch_collection_items(collection_address: str, mode: str):
 
             payload = resp.json()
             raw_items = get_items_list(payload)
-            print(f"DEBUG {mode.upper()} PAGE {page_no} RAW ITEMS:", len(raw_items))
-
-            if page_no == 1 and raw_items:
-                print(f"DEBUG {mode.upper()} FIRST ITEM PREVIEW:")
-                print(str(raw_items[0])[:4000])
 
             if not raw_items:
-                print(f"DEBUG {mode.upper()} STOP: empty page")
                 break
 
             before_count = len(items)
@@ -437,7 +440,6 @@ async def fetch_collection_items(collection_address: str, mode: str):
 
             after_count = len(items)
             added_count = after_count - before_count
-            print(f"DEBUG {mode.upper()} PAGE {page_no} NEW UNIQUE:", added_count)
 
             if added_count == 0:
                 no_new_pages += 1
@@ -445,7 +447,6 @@ async def fetch_collection_items(collection_address: str, mode: str):
                 no_new_pages = 0
 
             if no_new_pages >= 3:
-                print(f"DEBUG {mode.upper()} STOP: 3 pages with no new unique items")
                 break
 
             next_cursor = None
@@ -458,12 +459,10 @@ async def fetch_collection_items(collection_address: str, mode: str):
                         next_cursor = m.group(1)
 
             if not next_cursor:
-                print(f"DEBUG {mode.upper()} STOP: no next cursor")
                 break
 
             cursor = next_cursor
 
-    print(f"DEBUG {mode.upper()} TOTAL UNIQUE ITEMS:", len(items))
     return items
 
 
@@ -635,9 +634,8 @@ def usd_after_add(ton_price: float, ton_usd_rate: float, add_usd: float) -> floa
     return ton_price * ton_usd_rate + add_usd
 
 
-def build_message(section_5, section_6, number_floor, ton_usd_rate):
+def build_usernames_message(section_5, section_6, ton_usd_rate):
     now_str = datetime.now(TZ).strftime("%Y-%m-%d %H:%M:%S")
-
     lines = ["用户名价格实时更新：", ""]
 
     lines.append("【5位用户名】")
@@ -657,26 +655,29 @@ def build_message(section_5, section_6, number_floor, ton_usd_rate):
             usd_val = usd_after_add(item["ton_price"], ton_usd_rate, USERNAME_ADD_USD[6])
             lines.append(f"{item['name']}  ${usd_val:.2f}")
     lines.append("")
+    lines.append(f"更新时间：{now_str}")
+    return "\n".join(lines)
 
-    if number_floor:
-        lines.append("【888】地板价")
 
-        item = number_floor.get("has4")
-        if item:
-            usd_val = usd_after_add(item["ton_price"], ton_usd_rate, NUMBER_ADD_USD["has4"])
-            lines.append(f"【有4】 {item['name']} - ${usd_val:.2f}")
-        else:
-            lines.append("【有4】 暂无数据")
+def build_numbers_message(number_floor, ton_usd_rate):
+    now_str = datetime.now(TZ).strftime("%Y-%m-%d %H:%M:%S")
+    lines = ["📱【888】地板价"]
 
-        item = number_floor.get("no4")
-        if item:
-            usd_val = usd_after_add(item["ton_price"], ton_usd_rate, NUMBER_ADD_USD["no4"])
-            lines.append(f"【无4】 {item['name']} - ${usd_val:.2f}")
-        else:
-            lines.append("【无4】 暂无数据")
+    item = number_floor.get("has4")
+    if item:
+        usd_val = usd_after_add(item["ton_price"], ton_usd_rate, NUMBER_ADD_USD["has4"])
+        lines.append(f"【含4正常】 {item['name']} - ${usd_val:.2f}")
+    else:
+        lines.append("【含4正常】 暂无数据")
 
-        lines.append("")
+    item = number_floor.get("no4")
+    if item:
+        usd_val = usd_after_add(item["ton_price"], ton_usd_rate, NUMBER_ADD_USD["no4"])
+        lines.append(f"【无4正常】 {item['name']} - ${usd_val:.2f}")
+    else:
+        lines.append("【无4正常】 暂无数据")
 
+    lines.append("")
     lines.append(f"更新时间：{now_str}")
     return "\n".join(lines)
 
@@ -709,29 +710,29 @@ async def verify_telegram_bot():
     })
 
 
-async def send_new_message(text: str):
+async def send_new_message(chat_id: str, text: str, label: str):
     payload = {
-        "chat_id": CHAT_ID,
+        "chat_id": chat_id,
         "text": text,
         "disable_web_page_preview": True,
     }
     data = await telegram_api("sendMessage", payload)
     if not data.get("ok"):
-        raise RuntimeError(f"Telegram sendMessage failed: {data}")
+        raise RuntimeError(f"Telegram sendMessage failed for {label}: {data}")
 
     result = data.get("result", {})
     new_message_id = result.get("message_id")
-    print("DEBUG NEW MESSAGE ID:", new_message_id)
+    print(f"DEBUG NEW MESSAGE ID [{label}]:", new_message_id)
     return new_message_id
 
 
-async def edit_existing_message(text: str):
-    if not MESSAGE_ID:
+async def edit_existing_message(chat_id: str, message_id: int | None, text: str, label: str):
+    if not message_id:
         return False
 
     payload = {
-        "chat_id": CHAT_ID,
-        "message_id": MESSAGE_ID,
+        "chat_id": chat_id,
+        "message_id": message_id,
         "text": text,
         "disable_web_page_preview": True,
     }
@@ -739,42 +740,40 @@ async def edit_existing_message(text: str):
     data = await telegram_api("editMessageText", payload)
 
     if data.get("ok"):
-        print("DEBUG TELEGRAM EDIT: success")
+        print(f"DEBUG TELEGRAM EDIT [{label}]: success")
         return True
 
     desc = str(data.get("description", "")).lower()
     error_code = data.get("error_code")
 
     if "message is not modified" in desc:
-        print("DEBUG TELEGRAM EDIT: unchanged")
+        print(f"DEBUG TELEGRAM EDIT [{label}]: unchanged")
         return True
 
-    print("DEBUG TELEGRAM EDIT FAILED:", data)
+    print(f"DEBUG TELEGRAM EDIT FAILED [{label}]:", data)
 
     if error_code in {400, 404}:
         return False
 
-    raise RuntimeError(f"Telegram edit failed: {data}")
+    raise RuntimeError(f"Telegram edit failed for {label}: {data}")
 
 
-async def upsert_message(text: str):
-    edited = await edit_existing_message(text)
+async def upsert_message(chat_id: str, message_id: int | None, text: str, label: str):
+    edited = await edit_existing_message(chat_id, message_id, text, label)
     if edited:
         return
 
-    new_message_id = await send_new_message(text)
-    print("IMPORTANT: Update YOUR_MESSAGE_ID secret to:", new_message_id)
+    new_message_id = await send_new_message(chat_id, text, label)
+    print(f"IMPORTANT: Update {label} message id secret to:", new_message_id)
 
 
 async def main():
     ton_usd_rate = await fetch_ton_usd_rate()
-    print("DEBUG TON USD RATE:", ton_usd_rate)
 
     username_items = await fetch_collection_items(
         USERNAMES_COLLECTION_ADDRESS,
         mode="usernames",
     )
-
     section_5 = build_username_section(username_items, 5)
     section_6 = build_username_section(username_items, 6)
 
@@ -786,33 +785,32 @@ async def main():
         )
         number_floor = build_number_floor(number_items)
 
-    print("DEBUG SECTION 5 COUNT:", len(section_5))
-    print("DEBUG SECTION 6 COUNT:", len(section_6))
-    print("DEBUG USERNAME SAMPLE:")
-    for x in username_items[:10]:
-        print(
-            {
-                "name": x["name"],
-                "length": x["length"],
-                "ton_price": x["ton_price"],
-                "is_restricted": x["is_restricted"],
-            }
-        )
+    usernames_text = build_usernames_message(section_5, section_6, ton_usd_rate)
+    numbers_text = build_numbers_message(number_floor, ton_usd_rate) if NUMBERS_COLLECTION_ADDRESS else None
 
-    if number_floor:
-        print("DEBUG NUMBER FLOOR:")
-        for k, v in number_floor.items():
-            if v:
-                print(k, {"name": v["name"], "ton_price": v["ton_price"]})
-            else:
-                print(k, None)
+    print("DEBUG USERNAMES MESSAGE PREVIEW:")
+    print(usernames_text[:3000])
 
-    text = build_message(section_5, section_6, number_floor, ton_usd_rate)
-    print("DEBUG FINAL MESSAGE PREVIEW:")
-    print(text[:4000])
+    if numbers_text:
+        print("DEBUG NUMBERS MESSAGE PREVIEW:")
+        print(numbers_text[:3000])
 
     await verify_telegram_bot()
-    await upsert_message(text)
+
+    await upsert_message(
+        USERNAMES_CHAT_ID,
+        USERNAMES_MESSAGE_ID,
+        usernames_text,
+        "USERNAMES_MESSAGE_ID",
+    )
+
+    if numbers_text:
+        await upsert_message(
+            NUMBERS_CHAT_ID,
+            NUMBERS_MESSAGE_ID,
+            numbers_text,
+            "NUMBERS_MESSAGE_ID",
+        )
 
 
 if __name__ == "__main__":

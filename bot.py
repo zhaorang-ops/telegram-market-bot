@@ -38,19 +38,16 @@ NUMBERS_COLLECTION_ADDRESS = normalize_collection_address(
 
 TZ = ZoneInfo(os.environ.get("TZ", "Asia/Shanghai"))
 TOP_N_EACH = int(os.environ.get("TOP_N_EACH", "20"))
-MAX_PAGES = int(os.environ.get("MAX_PAGES", "50"))
+MAX_PAGES = int(os.environ.get("MAX_PAGES", "300"))
 
 USERNAME_ADD_USD = {
-    4: 1000.0,
     5: 50.0,
     6: 50.0,
 }
 
 NUMBER_ADD_USD = {
-    "has4_no_restricted": 100.0,
-    "no4_no_restricted": 100.0,
-    "abcd": 20000.0,
-    "abcd_abcd": 100.0,
+    "has4": 100.0,
+    "no4": 100.0,
 }
 
 USERNAME_RE = re.compile(r"^@?[A-Za-z0-9_]{4,32}$")
@@ -131,8 +128,10 @@ def normalize_number(name: str) -> str:
     else:
         digits = text
 
-    if digits.startswith("888") and len(digits) >= 7:
+    if digits.startswith("888"):
         tail = digits[3:]
+        if len(tail) == 4:
+            return f"+888 {tail[0]} {tail[1:]}"
         if len(tail) == 8:
             return f"+888 {tail[:4]} {tail[4:]}"
         return f"+{digits}"
@@ -323,7 +322,7 @@ def parse_item(raw: dict, mode: str):
         attr_len = extract_attr_length(raw)
         clean = name.lstrip("@")
         length_value = attr_len if attr_len is not None else len(clean)
-        if length_value not in {4, 5, 6}:
+        if length_value not in {5, 6}:
             return None
     else:
         length_value = None
@@ -442,30 +441,125 @@ async def fetch_collection_items(collection_address: str, mode: str):
     return items
 
 
-def build_username_groups(items):
-    groups = {4: [], 5: [], 6: []}
+def username_clean(name: str) -> str:
+    return name.lstrip("@").lower()
 
-    for item in items:
-        length_value = item["length"]
-        if length_value not in groups:
-            continue
 
-        if item["is_on_sale"] is False and item["ton_price"] <= 0:
-            continue
+def match_5_patterns(s: str):
+    return {
+        "aa***": len(s) == 5 and s[0] == s[1],
+        "aaa**": len(s) == 5 and s[0] == s[1] == s[2],
+        "aaaa*": len(s) == 5 and s[0] == s[1] == s[2] == s[3],
+        "*aaaa": len(s) == 5 and s[1] == s[2] == s[3] == s[4],
+        "**aaa": len(s) == 5 and s[2] == s[3] == s[4],
+        "***aa": len(s) == 5 and s[3] == s[4],
+    }
 
-        groups[length_value].append(item)
 
-    for k in groups:
-        groups[k].sort(
-            key=lambda x: (
-                x["ton_price"] <= 0,
-                x["ton_price"] if x["ton_price"] > 0 else 10**18,
-                x["name"].lower(),
-            )
+def match_6_patterns(s: str):
+    return {
+        "aa****": len(s) == 6 and s[0] == s[1],
+        "aaa***": len(s) == 6 and s[0] == s[1] == s[2],
+        "aaaa**": len(s) == 6 and s[0] == s[1] == s[2] == s[3],
+        "**aaaa": len(s) == 6 and s[2] == s[3] == s[4] == s[5],
+        "***aaa": len(s) == 6 and s[3] == s[4] == s[5],
+        "****aa": len(s) == 6 and s[4] == s[5],
+    }
+
+
+def pattern_matchers(length_value: int):
+    if length_value == 5:
+        return [
+            ("aa***", lambda s: match_5_patterns(s)["aa***"]),
+            ("aaa**", lambda s: match_5_patterns(s)["aaa**"]),
+            ("aaaa*", lambda s: match_5_patterns(s)["aaaa*"]),
+            ("*aaaa", lambda s: match_5_patterns(s)["*aaaa"]),
+            ("**aaa", lambda s: match_5_patterns(s)["**aaa"]),
+            ("***aa", lambda s: match_5_patterns(s)["***aa"]),
+        ]
+    if length_value == 6:
+        return [
+            ("aa****", lambda s: match_6_patterns(s)["aa****"]),
+            ("aaa***", lambda s: match_6_patterns(s)["aaa***"]),
+            ("aaaa**", lambda s: match_6_patterns(s)["aaaa**"]),
+            ("**aaaa", lambda s: match_6_patterns(s)["**aaaa"]),
+            ("***aaa", lambda s: match_6_patterns(s)["***aaa"]),
+            ("****aa", lambda s: match_6_patterns(s)["****aa"]),
+        ]
+    return []
+
+
+def build_username_section(items, length_value: int):
+    pool = [
+        x for x in items
+        if x["length"] == length_value and not (x["is_on_sale"] is False and x["ton_price"] <= 0)
+    ]
+
+    pool.sort(
+        key=lambda x: (
+            x["ton_price"] <= 0,
+            x["ton_price"] if x["ton_price"] > 0 else 10**18,
+            x["name"].lower(),
         )
-        groups[k] = groups[k][:TOP_N_EACH]
+    )
 
-    return groups
+    matchers = pattern_matchers(length_value)
+
+    def is_special(item):
+        s = username_clean(item["name"])
+        return any(fn(s) for _, fn in matchers)
+
+    used = set()
+
+    normal_candidates = [x for x in pool if not is_special(x)]
+    first_14 = []
+
+    for x in normal_candidates:
+        k = x["name"].lower()
+        if k in used:
+            continue
+        used.add(k)
+        first_14.append(x)
+        if len(first_14) == 14:
+            break
+
+    if len(first_14) < 14:
+        for x in pool:
+            k = x["name"].lower()
+            if k in used:
+                continue
+            used.add(k)
+            first_14.append(x)
+            if len(first_14) == 14:
+                break
+
+    last_6 = []
+    for _, fn in matchers:
+        chosen = None
+        for x in pool:
+            k = x["name"].lower()
+            if k in used:
+                continue
+            if fn(username_clean(x["name"])):
+                chosen = x
+                break
+
+        if chosen:
+            used.add(chosen["name"].lower())
+            last_6.append(chosen)
+        else:
+            filler = None
+            for x in pool:
+                k = x["name"].lower()
+                if k in used:
+                    continue
+                filler = x
+                break
+            if filler:
+                used.add(filler["name"].lower())
+                last_6.append(filler)
+
+    return first_14 + last_6
 
 
 def number_digits(name: str) -> str:
@@ -495,29 +589,19 @@ def floor_pick(items, predicate):
 
 
 def build_number_floor(items):
-    valid = [x for x in items if x["ton_price"] > 0]
+    valid = [x for x in items if x["ton_price"] > 0 and not x["is_restricted"]]
 
-    def has4_no_restricted(x):
+    def has4(x):
         tail = number_tail(x["name"])
-        return (not x["is_restricted"]) and ("4" in tail)
+        return "4" in tail
 
-    def no4_no_restricted(x):
+    def no4(x):
         tail = number_tail(x["name"])
-        return (not x["is_restricted"]) and ("4" not in tail)
-
-    def abcd(x):
-        tail = number_tail(x["name"])
-        return (not x["is_restricted"]) and len(tail) == 8 and tail[:4] != tail[4:]
-
-    def abcd_abcd(x):
-        tail = number_tail(x["name"])
-        return (not x["is_restricted"]) and len(tail) == 8 and tail[:4] == tail[4:]
+        return "4" not in tail
 
     return {
-        "has4_no_restricted": floor_pick(valid, has4_no_restricted),
-        "no4_no_restricted": floor_pick(valid, no4_no_restricted),
-        "abcd": floor_pick(valid, abcd),
-        "abcd_abcd": floor_pick(valid, abcd_abcd),
+        "has4": floor_pick(valid, has4),
+        "no4": floor_pick(valid, no4),
     }
 
 
@@ -525,49 +609,45 @@ def usd_after_add(ton_price: float, ton_usd_rate: float, add_usd: float) -> floa
     return ton_price * ton_usd_rate + add_usd
 
 
-def build_message(username_groups, number_floor, ton_usd_rate):
+def build_message(section_5, section_6, number_floor, ton_usd_rate):
     now_str = datetime.now(TZ).strftime("%Y-%m-%d %H:%M:%S")
 
     lines = ["用户名价格实时更新：", ""]
 
-    for length_value in [4, 5, 6]:
-        lines.append(f"【{length_value}位用户名】")
-        current_items = username_groups.get(length_value, [])
-
-        if not current_items:
-            lines.append("暂无数据")
-            lines.append("")
-            continue
-
-        extra = USERNAME_ADD_USD[length_value]
-
-        for item in current_items:
-            usd_val = usd_after_add(item["ton_price"], ton_usd_rate, extra)
+    lines.append("【5位用户名】")
+    if not section_5:
+        lines.append("暂无数据")
+    else:
+        for item in section_5:
+            usd_val = usd_after_add(item["ton_price"], ton_usd_rate, USERNAME_ADD_USD[5])
             lines.append(f"{item['name']}  ${usd_val:.2f}")
+    lines.append("")
 
-        lines.append("")
+    lines.append("【6位用户名】")
+    if not section_6:
+        lines.append("暂无数据")
+    else:
+        for item in section_6:
+            usd_val = usd_after_add(item["ton_price"], ton_usd_rate, USERNAME_ADD_USD[6])
+            lines.append(f"{item['name']}  ${usd_val:.2f}")
+    lines.append("")
 
     if number_floor:
         lines.append("【888】地板价")
 
-        mapping = [
-            ("has4_no_restricted", "[有4不带Restricted]"),
-            ("no4_no_restricted", "[无4不带Restricted]"),
-            ("abcd", "[+888 abcd]"),
-            ("abcd_abcd", "[+888 abcd abcd]"),
-        ]
+        item = number_floor.get("has4")
+        if item:
+            usd_val = usd_after_add(item["ton_price"], ton_usd_rate, NUMBER_ADD_USD["has4"])
+            lines.append(f"【有4】 {item['name']} - ${usd_val:.2f}")
+        else:
+            lines.append("【有4】 暂无数据")
 
-        for key, label in mapping:
-            item = number_floor.get(key)
-            if not item:
-                lines.append(f"{label} 暂无数据")
-                continue
-
-            extra = NUMBER_ADD_USD[key]
-            usd_val = usd_after_add(item["ton_price"], ton_usd_rate, extra)
-
-            restricted_text = " [Restricted]" if item["is_restricted"] else ""
-            lines.append(f"{label} {item['name']}{restricted_text} - ${usd_val:.2f}")
+        item = number_floor.get("no4")
+        if item:
+            usd_val = usd_after_add(item["ton_price"], ton_usd_rate, NUMBER_ADD_USD["no4"])
+            lines.append(f"【无4】 {item['name']} - ${usd_val:.2f}")
+        else:
+            lines.append("【无4】 暂无数据")
 
         lines.append("")
 
@@ -604,7 +684,9 @@ async def main():
         USERNAMES_COLLECTION_ADDRESS,
         mode="usernames",
     )
-    username_groups = build_username_groups(username_items)
+
+    section_5 = build_username_section(username_items, 5)
+    section_6 = build_username_section(username_items, 6)
 
     number_floor = {}
     if NUMBERS_COLLECTION_ADDRESS:
@@ -614,7 +696,8 @@ async def main():
         )
         number_floor = build_number_floor(number_items)
 
-    print("DEBUG USERNAME GROUP COUNTS:", {k: len(v) for k, v in username_groups.items()})
+    print("DEBUG SECTION 5 COUNT:", len(section_5))
+    print("DEBUG SECTION 6 COUNT:", len(section_6))
     print("DEBUG USERNAME SAMPLE:")
     for x in username_items[:10]:
         print(
@@ -630,11 +713,11 @@ async def main():
         print("DEBUG NUMBER FLOOR:")
         for k, v in number_floor.items():
             if v:
-                print(k, {"name": v["name"], "ton_price": v["ton_price"], "is_restricted": v["is_restricted"]})
+                print(k, {"name": v["name"], "ton_price": v["ton_price"]})
             else:
                 print(k, None)
 
-    text = build_message(username_groups, number_floor, ton_usd_rate)
+    text = build_message(section_5, section_6, number_floor, ton_usd_rate)
     print("DEBUG FINAL MESSAGE PREVIEW:")
     print(text[:4000])
 

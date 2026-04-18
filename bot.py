@@ -54,6 +54,12 @@ def parse_marketapp_url(url: str):
     }
 
 
+def parse_prefixes(value: str):
+    if not value:
+        return []
+    return [x.strip().lower() for x in value.split(",") if x.strip()]
+
+
 BOT_TOKEN = os.environ["BOT_TOKEN"].strip()
 MARKETAPP_API_TOKEN = os.environ["MARKETAPP_API_TOKEN"].strip()
 
@@ -83,7 +89,10 @@ NUMBERS_COLLECTION_ADDRESS = normalize_collection_address(
 )
 
 TZ = ZoneInfo(os.environ.get("TZ", "Asia/Shanghai"))
-MAX_PAGES = int(os.environ.get("MAX_PAGES", "120"))
+MAX_PAGES = int(os.environ.get("MAX_PAGES", "200"))
+
+USERNAMES_5_PREFIXES = parse_prefixes(os.environ.get("USERNAMES_5_PREFIXES", ""))
+USERNAMES_6_PREFIXES = parse_prefixes(os.environ.get("USERNAMES_6_PREFIXES", ""))
 
 USERNAME_ADD_USD = {
     5: 50.0,
@@ -446,11 +455,11 @@ async def fetch_collection_items(collection_address: str, mode: str):
     }
 
     cursor = None
-    items = []
+    items_map = {}
     no_new_pages = 0
 
     async with httpx.AsyncClient(timeout=30) as client:
-        for _ in range(1, MAX_PAGES + 1):
+        for page_no in range(1, MAX_PAGES + 1):
             params = {
                 "limit": 100,
                 "filter_by": "onsale",
@@ -463,6 +472,7 @@ async def fetch_collection_items(collection_address: str, mode: str):
             if resp.status_code == 400:
                 body_text = resp.text[:5000]
                 if "Invalid cursor format" in body_text:
+                    print(f"DEBUG {mode.upper()} STOP invalid cursor at page {page_no}")
                     break
                 resp.raise_for_status()
 
@@ -473,9 +483,10 @@ async def fetch_collection_items(collection_address: str, mode: str):
             raw_items = get_items_list(payload)
 
             if not raw_items:
+                print(f"DEBUG {mode.upper()} STOP empty page {page_no}")
                 break
 
-            before_count = len(items)
+            before_count = len(items_map)
 
             for raw in raw_items:
                 if not isinstance(raw, dict):
@@ -486,26 +497,27 @@ async def fetch_collection_items(collection_address: str, mode: str):
                     continue
 
                 dedupe_key = item["name"].lower()
-                old_index = next((i for i, x in enumerate(items) if x["name"].lower() == dedupe_key), None)
+                old = items_map.get(dedupe_key)
 
-                if old_index is None:
-                    items.append(item)
+                if old is None:
+                    items_map[dedupe_key] = item
                 else:
-                    old = items[old_index]
                     old_price = old["ton_price"] if old["ton_price"] > 0 else 10**18
                     new_price = item["ton_price"] if item["ton_price"] > 0 else 10**18
                     if new_price < old_price:
-                        items[old_index] = item
+                        items_map[dedupe_key] = item
 
-            after_count = len(items)
+            after_count = len(items_map)
             added_count = after_count - before_count
+            print(f"DEBUG {mode.upper()} PAGE {page_no}: raw={len(raw_items)} new_unique={added_count} total={after_count}")
 
             if added_count == 0:
                 no_new_pages += 1
             else:
                 no_new_pages = 0
 
-            if no_new_pages >= 3:
+            if no_new_pages >= 5:
+                print(f"DEBUG {mode.upper()} STOP 5 pages no new unique")
                 break
 
             next_cursor = None
@@ -518,15 +530,34 @@ async def fetch_collection_items(collection_address: str, mode: str):
                         next_cursor = m.group(1)
 
             if not next_cursor:
+                print(f"DEBUG {mode.upper()} STOP no next cursor")
                 break
 
             cursor = next_cursor
 
-    return items
+    return list(items_map.values())
 
 
 def username_clean(name: str) -> str:
     return name.lstrip("@").lower()
+
+
+def match_prefix(name: str, prefixes):
+    if not prefixes:
+        return True
+    clean = username_clean(name)
+    return any(clean.startswith(p) for p in prefixes)
+
+
+def sort_items(items):
+    return sorted(
+        items,
+        key=lambda x: (
+            x["ton_price"] <= 0,
+            x["ton_price"] if x["ton_price"] > 0 else 10**18,
+            x["name"].lower(),
+        )
+    )
 
 
 def match_5_patterns(s: str):
@@ -573,20 +604,15 @@ def pattern_matchers(length_value: int):
     return []
 
 
-def build_username_section(items, length_value: int):
+def build_username_section(items, length_value: int, prefixes=None):
     pool = [
         x for x in items
-        if x["length"] == length_value and not (x["is_on_sale"] is False and x["ton_price"] <= 0)
+        if x["length"] == length_value
+        and not (x["is_on_sale"] is False and x["ton_price"] <= 0)
+        and match_prefix(x["name"], prefixes or [])
     ]
 
-    pool.sort(
-        key=lambda x: (
-            x["ton_price"] <= 0,
-            x["ton_price"] if x["ton_price"] > 0 else 10**18,
-            x["name"].lower(),
-        )
-    )
-
+    pool = sort_items(pool)
     matchers = pattern_matchers(length_value)
 
     def is_special(item):
@@ -705,29 +731,40 @@ def html_escape(text: str) -> str:
 def build_usernames_message(section_5, section_6, ton_usd_rate):
     now_str = datetime.now(TZ).strftime("%Y-%m-%d %H:%M:%S")
 
-    lines = []
-    lines.append("【5位用户名】")
-    if not section_5:
-        lines.append("暂无数据")
-    else:
-        for item in section_5:
-            usd_val = usd_after_add(item["ton_price"], ton_usd_rate, USERNAME_ADD_USD[5])
-            lines.append(f"{item['name']}  ${usd_val:.2f}")
+    left_title = "【5位用户名】"
+    right_title = "【6位用户名】"
+    left_width = 26
+    right_width = 26
+    rows = max(len(section_5), len(section_6))
 
-    lines.append("")
-    lines.append("【6位用户名】")
-    if not section_6:
-        lines.append("暂无数据")
-    else:
-        for item in section_6:
+    lines = []
+    lines.append(f"{left_title:<{left_width}}{right_title:<{right_width}}")
+    lines.append(f"{'-' * 12:<{left_width}}{'-' * 12:<{right_width}}")
+
+    for i in range(rows):
+        left_text = ""
+        right_text = ""
+
+        if i < len(section_5):
+            item = section_5[i]
+            usd_val = usd_after_add(item["ton_price"], ton_usd_rate, USERNAME_ADD_USD[5])
+            left_text = f"{item['name']} ${usd_val:.2f}"
+
+        if i < len(section_6):
+            item = section_6[i]
             usd_val = usd_after_add(item["ton_price"], ton_usd_rate, USERNAME_ADD_USD[6])
-            lines.append(f"{item['name']}  ${usd_val:.2f}")
+            right_text = f"{item['name']} ${usd_val:.2f}"
+
+        lines.append(f"{left_text:<{left_width}}{right_text:<{right_width}}")
 
     lines.append("")
     lines.append(f"更多用户名咨询客服，更新时间：{now_str}")
 
     body = html_escape("\n".join(lines))
-    return f"多用户名价格实时更新（点开展开）\n<blockquote expandable>{body}</blockquote>"
+    return (
+        "多用户名价格实时更新（点开展开）\n"
+        f"<blockquote expandable><pre>{body}</pre></blockquote>"
+    )
 
 
 def build_numbers_message(number_floor, ton_usd_rate):
@@ -864,8 +901,21 @@ async def main():
         USERNAMES_COLLECTION_ADDRESS,
         mode="usernames",
     )
-    section_5 = build_username_section(username_items, 5)
-    section_6 = build_username_section(username_items, 6)
+
+    print(f"DEBUG USERNAME TOTAL UNIQUE: {len(username_items)}")
+    print(f"DEBUG PREFIX 5: {USERNAMES_5_PREFIXES}")
+    print(f"DEBUG PREFIX 6: {USERNAMES_6_PREFIXES}")
+
+    section_5 = build_username_section(
+        username_items,
+        5,
+        prefixes=USERNAMES_5_PREFIXES,
+    )
+    section_6 = build_username_section(
+        username_items,
+        6,
+        prefixes=USERNAMES_6_PREFIXES,
+    )
 
     number_floor = {}
     if NUMBERS_COLLECTION_ADDRESS:

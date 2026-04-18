@@ -54,35 +54,6 @@ def parse_marketapp_url(url: str):
     }
 
 
-def marketapp_api_params_from_url(url: str):
-    url = (url or "").strip()
-    if not url:
-        return {}
-
-    parsed = urlparse(url)
-    qs = parse_qs(parsed.query)
-
-    out = {}
-
-    single_keys = [
-        "query",
-        "sort_by",
-        "filter_by",
-        "min_price",
-        "max_price",
-    ]
-    for key in single_keys:
-        values = qs.get(key, [])
-        if values and values[0] != "":
-            out[key] = values[0]
-
-    attrs = qs.get("attrs", [])
-    if attrs:
-        out["attrs"] = attrs
-
-    return out
-
-
 BOT_TOKEN = os.environ["BOT_TOKEN"].strip()
 MARKETAPP_API_TOKEN = os.environ["MARKETAPP_API_TOKEN"].strip()
 
@@ -103,10 +74,6 @@ USERNAMES_5_INFO = parse_marketapp_url(USERNAMES_5_URL)
 USERNAMES_6_INFO = parse_marketapp_url(USERNAMES_6_URL)
 USERNAMES_7_INFO = parse_marketapp_url(USERNAMES_7_URL)
 
-USERNAMES_5_API_PARAMS = marketapp_api_params_from_url(USERNAMES_5_URL)
-USERNAMES_6_API_PARAMS = marketapp_api_params_from_url(USERNAMES_6_URL)
-USERNAMES_7_API_PARAMS = marketapp_api_params_from_url(USERNAMES_7_URL)
-
 USERNAMES_COLLECTION_ADDRESS = (
     USERNAMES_5_INFO["collection_address"]
     or USERNAMES_6_INFO["collection_address"]
@@ -119,8 +86,7 @@ NUMBERS_COLLECTION_ADDRESS = normalize_collection_address(
 )
 
 TZ = ZoneInfo(os.environ.get("TZ", "Asia/Shanghai"))
-MAX_PAGES = int(os.environ.get("MAX_PAGES", "70"))
-MAX_QUERY_PAGES = int(os.environ.get("MAX_QUERY_PAGES", "1"))
+MAX_PAGES = int(os.environ.get("MAX_PAGES", "50"))
 
 USERNAME_ADD_USD = {
     5: 50.0,
@@ -135,7 +101,9 @@ NUMBER_ADD_USD = {
 
 USERNAME_RE = re.compile(r"^@?[A-Za-z0-9_]{4,32}$")
 NUMBER_RE = re.compile(r"^\+?\d[\d\s]{6,}$")
-USERNAME_QUERY_CHARS = "abcdefghijklmnopqrstuvwxyz0123456789"
+
+USERNAME_QUERY_ALPHA_CHARS = "abcdefghijklmnopqrstuvwxyz"
+USERNAME_QUERY_DIGIT_CHARS = ["6", "8", "9", "0", "1", "2", "3", "4", "5", "7"]
 
 PROMO_BUTTON_TEXT = "联系客服"
 PROMO_BUTTON_URL = "https://t.me/daimei1"
@@ -153,66 +121,49 @@ PROMO_MESSAGE_HTML = """
 官方多用户名可和礼物增加账号权重不易被封<tg-emoji emoji-id="5220166546491459639">🔥</tg-emoji>招牌11年防注销老号，注册超过11年的飞机号，超级无敌螺旋盖亚聚变核能耐操。
 """.strip()
 
-USERNAME_PATTERN_CONFIG = {
-    5: {
-        "patterns": [
-            "aaaa*",
-            "aaa*a",
-            "aa*aa",
-            "a*aaa",
-            "*aaaa",
-            "aaa**",
-            "aa**a",
-            "a**aa",
-            "aaa",
-            "aa***",
-            "a***a",
-            "***aa",
-            "a****",
-            "****a",
-        ],
-        "extra_count": 6,
-    },
-    6: {
-        "patterns": [
-            "aaaaa*",
-            "aaaa*a",
-            "aaa*aa",
-            "aa*aaa",
-            "a*aaaa",
-            "*aaaaa",
-            "aaaa",
-            "aaa**a",
-            "aa**aa",
-            "a**aaa",
-            "aaaa",
-            "aaa***",
-            "aa***a",
-            "a***aa",
-            "***aaa",
-            "aa****",
-            "a****a",
-            "****aa",
-        ],
-        "extra_count": 2,
-    },
-    7: {
-        "patterns": [
-            "aaaaaa*",
-            "aaaaa*a",
-            "aaaa*aa",
-            "aaa*aaa",
-            "aa*aaaa",
-            "a*aaaaa",
-            "aaaaa",
-            "aaaa**a",
-            "aaa**aa",
-            "aa**aaa",
-            "a**aaaa",
-        ],
-        "extra_count": 0,
-    },
+USERNAME_RULES = {
+    5: [
+        ("4拼", 4, "alpha"),
+        ("4数", 4, "digit"),
+        ("3拼", 3, "alpha"),
+        ("3数", 3, "digit"),
+        ("2拼", 2, "alpha"),
+        ("2数", 2, "digit"),
+        ("1314", None, "fixed"),
+        ("520", None, "fixed"),
+        ("521", None, "fixed"),
+    ],
+    6: [
+        ("5拼", 5, "alpha"),
+        ("5数", 5, "digit"),
+        ("4拼", 4, "alpha"),
+        ("4数", 4, "digit"),
+        ("3拼", 3, "alpha"),
+        ("3数", 3, "digit"),
+        ("1314", None, "fixed"),
+        ("520", None, "fixed"),
+        ("521", None, "fixed"),
+    ],
+    7: [
+        ("6拼", 6, "alpha"),
+        ("6数", 6, "digit"),
+        ("5拼", 5, "alpha"),
+        ("5数", 5, "digit"),
+        ("4拼", 4, "alpha"),
+        ("4数", 4, "digit"),
+        ("1314", None, "fixed"),
+        ("520", None, "fixed"),
+        ("521", None, "fixed"),
+    ],
 }
+
+USERNAME_EXTRA_COUNT = {
+    5: 6,
+    6: 6,
+    7: 6,
+}
+
+QUERY_RESULT_CACHE = {}
 
 
 def build_promo_reply_markup():
@@ -702,50 +653,35 @@ def sort_items(items):
     )
 
 
-def max_a_run(pattern: str) -> int:
-    best = 0
-    cur = 0
-    for ch in pattern:
-        if ch == "a":
-            cur += 1
-            best = max(best, cur)
-        else:
-            cur = 0
-    return best
-
-
-def pattern_total_a(pattern: str) -> int:
-    return pattern.count("a")
-
-
-def pattern_query_lengths(pattern: str):
-    lengths = {max_a_run(pattern), pattern_total_a(pattern)}
-    return sorted(x for x in lengths if x >= 2)
-
-
-def match_pattern(clean: str, pattern: str) -> bool:
-    if len(pattern) == len(clean):
-        groups = {}
-        for i, ch in enumerate(pattern):
-            if ch == "*":
-                continue
-            groups.setdefault(ch, []).append(i)
-
-        for positions in groups.values():
-            first_char = clean[positions[0]]
-            for pos in positions[1:]:
-                if clean[pos] != first_char:
-                    return False
-        return True
-
-    if pattern and set(pattern) == {"a"} and len(pattern) <= len(clean):
-        run_len = len(pattern)
-        for i in range(len(clean) - run_len + 1):
-            chunk = clean[i:i + run_len]
-            if len(set(chunk)) == 1:
-                return True
+def has_same_run(s: str, run_len: int, kind: str) -> bool:
+    if len(s) < run_len:
         return False
 
+    for i in range(len(s) - run_len + 1):
+        chunk = s[i:i + run_len]
+        if len(set(chunk)) != 1:
+            continue
+
+        ch = chunk[0]
+        if kind == "alpha" and ch.isalpha():
+            return True
+        if kind == "digit" and ch.isdigit():
+            return True
+
+    return False
+
+
+def matches_fixed_keyword(s: str, keyword: str) -> bool:
+    return keyword in s
+
+
+def rule_match(clean: str, rule_name: str, run_len, kind: str) -> bool:
+    if kind == "alpha":
+        return has_same_run(clean, run_len, "alpha")
+    if kind == "digit":
+        return has_same_run(clean, run_len, "digit")
+    if kind == "fixed":
+        return matches_fixed_keyword(clean, rule_name)
     return False
 
 
@@ -765,54 +701,63 @@ def pick_closest_by_price(candidates, target_price):
     )
 
 
-async def fetch_best_match_for_pattern(length_value: int, pattern: str, base_params: dict):
-    query_lengths = pattern_query_lengths(pattern)
-    if not query_lengths:
+async def fetch_best_match_by_query(length_value: int, rule_name: str, run_len, kind: str):
+    cache_key = (length_value, rule_name, run_len, kind)
+    if cache_key in QUERY_RESULT_CACHE:
+        return QUERY_RESULT_CACHE[cache_key]
+
+    base_params = {
+        "filter_by": "onsale",
+        "attrs": [f"Length~{length_value}"],
+        "sort_by": "price_asc",
+    }
+
+    if kind == "alpha":
+        queries = [ch * run_len for ch in USERNAME_QUERY_ALPHA_CHARS]
+    elif kind == "digit":
+        queries = [ch * run_len for ch in USERNAME_QUERY_DIGIT_CHARS]
+    elif kind == "fixed":
+        queries = [rule_name]
+    else:
+        QUERY_RESULT_CACHE[cache_key] = None
         return None
 
-    params_base = dict(base_params or {})
-    params_base["filter_by"] = "onsale"
+    best = None
 
-    attrs = list(params_base.get("attrs", []))
-    need_attr = f"Length~{length_value}"
-    if need_attr not in attrs:
-        attrs.append(need_attr)
-    params_base["attrs"] = attrs
+    for q in queries:
+        params = dict(base_params)
+        params["query"] = q
 
-    candidates = {}
+        items = await fetch_collection_items(
+            USERNAMES_COLLECTION_ADDRESS,
+            mode="usernames",
+            extra_params=params,
+            fail_soft=True,
+            page_limit=1,
+        )
 
-    for ql in query_lengths:
-        for ch in USERNAME_QUERY_CHARS:
-            params = dict(params_base)
-            params["query"] = ch * ql
+        candidates = [
+            x for x in items
+            if x["length"] == length_value
+            and rule_match(username_clean(x["name"]), rule_name, run_len, kind)
+        ]
+        candidates = sort_items(candidates)
 
-            items = await fetch_collection_items(
-                USERNAMES_COLLECTION_ADDRESS,
-                mode="usernames",
-                extra_params=params,
-                fail_soft=True,
-                page_limit=MAX_QUERY_PAGES,
+        if candidates:
+            best = candidates[0]
+            print(
+                f"DEBUG QUERY HIT length={length_value} "
+                f"rule={rule_name} kind={kind} query={q} name={best['name']}"
             )
+            break
 
-            for item in items:
-                if item["length"] != length_value:
-                    continue
-                if match_pattern(username_clean(item["name"]), pattern):
-                    merge_lowest_price_item(candidates, item)
-
-            if len(candidates) >= 2:
-                return sort_items(list(candidates.values()))[0]
-
-    if not candidates:
-        return None
-
-    return sort_items(list(candidates.values()))[0]
+    QUERY_RESULT_CACHE[cache_key] = best
+    return best
 
 
-async def build_username_section(all_items, length_value: int, api_params: dict):
-    config = USERNAME_PATTERN_CONFIG[length_value]
-    patterns = config["patterns"]
-    extra_count = config["extra_count"]
+async def build_username_section(all_items, length_value: int):
+    rules = USERNAME_RULES[length_value]
+    extra_count = USERNAME_EXTRA_COUNT[length_value]
 
     full_pool = sort_items([
         x for x in all_items
@@ -824,22 +769,23 @@ async def build_username_section(all_items, length_value: int, api_params: dict)
     selected = []
     last_price = None
 
-    for pattern in patterns:
-        local_matches = [
-            x for x in full_pool
-            if x["name"].lower() not in used
-            and match_pattern(username_clean(x["name"]), pattern)
-        ]
+    for rule_name, run_len, kind in rules:
+        chosen = await fetch_best_match_by_query(length_value, rule_name, run_len, kind)
 
-        if local_matches:
-            chosen = local_matches[0]
-        else:
-            chosen = await fetch_best_match_for_pattern(length_value, pattern, api_params)
+        if chosen and chosen["name"].lower() in used:
+            chosen = None
 
-            if chosen and chosen["name"].lower() in used:
-                chosen = None
+        if chosen is None:
+            local_matches = [
+                x for x in full_pool
+                if x["name"].lower() not in used
+                and rule_match(username_clean(x["name"]), rule_name, run_len, kind)
+            ]
+            local_matches = sort_items(local_matches)
 
-            if chosen is None:
+            if local_matches:
+                chosen = local_matches[0]
+            else:
                 remaining = [x for x in full_pool if x["name"].lower() not in used]
                 chosen = pick_closest_by_price(remaining, last_price)
 
@@ -852,11 +798,10 @@ async def build_username_section(all_items, length_value: int, api_params: dict)
         if chosen["ton_price"] > 0:
             last_price = chosen["ton_price"]
 
-    if extra_count > 0:
-        remaining = [x for x in full_pool if x["name"].lower() not in used]
-        for x in remaining[:extra_count]:
-            used.add(x["name"].lower())
-            selected.append(x)
+    remaining = [x for x in full_pool if x["name"].lower() not in used]
+    for x in remaining[:extra_count]:
+        used.add(x["name"].lower())
+        selected.append(x)
 
     return selected
 
@@ -1098,9 +1043,9 @@ async def main():
 
     all_username_items = await fetch_all_username_items()
 
-    section_5 = await build_username_section(all_username_items, 5, USERNAMES_5_API_PARAMS)
-    section_6 = await build_username_section(all_username_items, 6, USERNAMES_6_API_PARAMS)
-    section_7 = await build_username_section(all_username_items, 7, USERNAMES_7_API_PARAMS)
+    section_5 = await build_username_section(all_username_items, 5)
+    section_6 = await build_username_section(all_username_items, 6)
+    section_7 = await build_username_section(all_username_items, 7)
 
     number_floor = {}
     if NUMBERS_COLLECTION_ADDRESS:

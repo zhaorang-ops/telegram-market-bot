@@ -119,8 +119,8 @@ NUMBERS_COLLECTION_ADDRESS = normalize_collection_address(
 )
 
 TZ = ZoneInfo(os.environ.get("TZ", "Asia/Shanghai"))
-MAX_PAGES = int(os.environ.get("MAX_PAGES", "120"))
-MAX_QUERY_PAGES = int(os.environ.get("MAX_QUERY_PAGES", "2"))
+MAX_PAGES = int(os.environ.get("MAX_PAGES", "70"))
+MAX_QUERY_PAGES = int(os.environ.get("MAX_QUERY_PAGES", "1"))
 
 USERNAME_ADD_USD = {
     5: 50.0,
@@ -535,7 +535,7 @@ async def fetch_ton_usd_rate():
         return 0.0
 
 
-async def safe_get(client, url, headers, params, retries=3, fail_soft=False):
+async def safe_get(client, url, headers, params, retries=2, fail_soft=False):
     last_error = None
 
     for attempt in range(1, retries + 1):
@@ -546,13 +546,26 @@ async def safe_get(client, url, headers, params, retries=3, fail_soft=False):
             last_error = e
             print(f"DEBUG HTTP RETRY {attempt}/{retries} params={params} error={repr(e)}")
             if attempt < retries:
-                await asyncio.sleep(attempt * 2)
+                await asyncio.sleep(attempt)
 
     if fail_soft:
         print(f"DEBUG HTTP FAIL_SOFT params={params} error={repr(last_error)}")
         return None
 
     raise last_error
+
+
+def merge_lowest_price_item(items_map, item):
+    key = item["name"].lower()
+    old = items_map.get(key)
+    if old is None:
+        items_map[key] = item
+        return
+
+    old_price = old["ton_price"] if old["ton_price"] > 0 else 10**18
+    new_price = item["ton_price"] if item["ton_price"] > 0 else 10**18
+    if new_price < old_price:
+        items_map[key] = item
 
 
 async def fetch_collection_items(collection_address: str, mode: str, extra_params=None, fail_soft=False, page_limit=None):
@@ -570,7 +583,7 @@ async def fetch_collection_items(collection_address: str, mode: str, extra_param
     no_new_pages = 0
     extra_params = dict(extra_params or {})
 
-    timeout = httpx.Timeout(connect=20.0, read=60.0, write=30.0, pool=60.0)
+    timeout = httpx.Timeout(connect=15.0, read=30.0, write=20.0, pool=30.0)
     total_pages = page_limit or MAX_PAGES
 
     async with httpx.AsyncClient(timeout=timeout, follow_redirects=True) as client:
@@ -597,7 +610,7 @@ async def fetch_collection_items(collection_address: str, mode: str, extra_param
                 api_url,
                 headers=headers,
                 params=params,
-                retries=3,
+                retries=2,
                 fail_soft=fail_soft,
             )
 
@@ -605,7 +618,7 @@ async def fetch_collection_items(collection_address: str, mode: str, extra_param
                 return []
 
             if resp.status_code == 400:
-                body_text = resp.text[:5000]
+                body_text = resp.text[:2000]
                 if "Invalid cursor format" in body_text:
                     print(f"DEBUG {mode.upper()} STOP invalid cursor at page {page_no}")
                     break
@@ -648,8 +661,8 @@ async def fetch_collection_items(collection_address: str, mode: str, extra_param
             else:
                 no_new_pages = 0
 
-            if no_new_pages >= 5:
-                print(f"DEBUG {mode.upper()} STOP 5 pages no new unique")
+            if no_new_pages >= 3:
+                print(f"DEBUG {mode.upper()} STOP 3 pages no new unique")
                 break
 
             next_cursor = None
@@ -687,19 +700,6 @@ def sort_items(items):
             x["name"].lower(),
         )
     )
-
-
-def merge_lowest_price_item(items_map, item):
-    key = item["name"].lower()
-    old = items_map.get(key)
-    if old is None:
-        items_map[key] = item
-        return
-
-    old_price = old["ton_price"] if old["ton_price"] > 0 else 10**18
-    new_price = item["ton_price"] if item["ton_price"] > 0 else 10**18
-    if new_price < old_price:
-        items_map[key] = item
 
 
 def max_a_run(pattern: str) -> int:
@@ -765,39 +765,11 @@ def pick_closest_by_price(candidates, target_price):
     )
 
 
-def pick_with_preference(preferred_pool, full_pool, predicate, used, last_price):
-    preferred_matches = [
-        x for x in preferred_pool
-        if x["name"].lower() not in used and predicate(x)
-    ]
-    if preferred_matches:
-        return sort_items(preferred_matches)[0]
+async def fetch_best_match_for_pattern(length_value: int, pattern: str, base_params: dict):
+    query_lengths = pattern_query_lengths(pattern)
+    if not query_lengths:
+        return None
 
-    full_matches = [
-        x for x in full_pool
-        if x["name"].lower() not in used and predicate(x)
-    ]
-    if full_matches:
-        return sort_items(full_matches)[0]
-
-    preferred_remaining = [
-        x for x in preferred_pool
-        if x["name"].lower() not in used
-    ]
-    if preferred_remaining:
-        return pick_closest_by_price(preferred_remaining, last_price)
-
-    full_remaining = [
-        x for x in full_pool
-        if x["name"].lower() not in used
-    ]
-    if full_remaining:
-        return pick_closest_by_price(full_remaining, last_price)
-
-    return None
-
-
-async def fetch_query_pool_for_length(length_value: int, query_len: int, base_params: dict):
     params_base = dict(base_params or {})
     params_base["filter_by"] = "onsale"
 
@@ -807,57 +779,37 @@ async def fetch_query_pool_for_length(length_value: int, query_len: int, base_pa
         attrs.append(need_attr)
     params_base["attrs"] = attrs
 
-    merged = {}
+    candidates = {}
 
-    for ch in USERNAME_QUERY_CHARS:
-        params = dict(params_base)
-        params["query"] = ch * query_len
+    for ql in query_lengths:
+        for ch in USERNAME_QUERY_CHARS:
+            params = dict(params_base)
+            params["query"] = ch * ql
 
-        items = await fetch_collection_items(
-            USERNAMES_COLLECTION_ADDRESS,
-            mode="usernames",
-            extra_params=params,
-            fail_soft=True,
-            page_limit=MAX_QUERY_PAGES,
-        )
+            items = await fetch_collection_items(
+                USERNAMES_COLLECTION_ADDRESS,
+                mode="usernames",
+                extra_params=params,
+                fail_soft=True,
+                page_limit=MAX_QUERY_PAGES,
+            )
 
-        for item in items:
-            if item["length"] == length_value:
-                merge_lowest_price_item(merged, item)
-
-    result = sort_items(list(merged.values()))
-    print(f"DEBUG QUERY_POOL length={length_value} query_len={query_len} count={len(result)}")
-    return result
-
-
-async def fetch_pattern_preferred_map(length_value: int, base_params: dict):
-    patterns = list(dict.fromkeys(USERNAME_PATTERN_CONFIG[length_value]["patterns"]))
-
-    needed_query_lens = sorted({
-        ql
-        for pattern in patterns
-        for ql in pattern_query_lengths(pattern)
-    })
-
-    query_pools = {}
-    for ql in needed_query_lens:
-        query_pools[ql] = await fetch_query_pool_for_length(length_value, ql, base_params)
-
-    preferred_by_pattern = {}
-    for pattern in patterns:
-        merged = {}
-        for ql in pattern_query_lengths(pattern):
-            for item in query_pools.get(ql, []):
+            for item in items:
+                if item["length"] != length_value:
+                    continue
                 if match_pattern(username_clean(item["name"]), pattern):
-                    merge_lowest_price_item(merged, item)
+                    merge_lowest_price_item(candidates, item)
 
-        preferred_by_pattern[pattern] = sort_items(list(merged.values()))
-        print(f"DEBUG PATTERN length={length_value} pattern={pattern} preferred={len(preferred_by_pattern[pattern])}")
+            if len(candidates) >= 2:
+                return sort_items(list(candidates.values()))[0]
 
-    return preferred_by_pattern
+    if not candidates:
+        return None
+
+    return sort_items(list(candidates.values()))[0]
 
 
-def build_username_section(all_items, preferred_by_pattern, length_value: int):
+async def build_username_section(all_items, length_value: int, api_params: dict):
     config = USERNAME_PATTERN_CONFIG[length_value]
     patterns = config["patterns"]
     extra_count = config["extra_count"]
@@ -873,28 +825,35 @@ def build_username_section(all_items, preferred_by_pattern, length_value: int):
     last_price = None
 
     for pattern in patterns:
-        preferred_pool = preferred_by_pattern.get(pattern, [])
+        local_matches = [
+            x for x in full_pool
+            if x["name"].lower() not in used
+            and match_pattern(username_clean(x["name"]), pattern)
+        ]
 
-        chosen = pick_with_preference(
-            preferred_pool,
-            full_pool,
-            lambda x, p=pattern: match_pattern(username_clean(x["name"]), p),
-            used,
-            last_price,
-        )
+        if local_matches:
+            chosen = local_matches[0]
+        else:
+            chosen = await fetch_best_match_for_pattern(length_value, pattern, api_params)
+
+            if chosen and chosen["name"].lower() in used:
+                chosen = None
+
+            if chosen is None:
+                remaining = [x for x in full_pool if x["name"].lower() not in used]
+                chosen = pick_closest_by_price(remaining, last_price)
+
         if not chosen:
             break
 
         used.add(chosen["name"].lower())
         selected.append(chosen)
+
         if chosen["ton_price"] > 0:
             last_price = chosen["ton_price"]
 
     if extra_count > 0:
-        remaining = [
-            x for x in full_pool
-            if x["name"].lower() not in used
-        ]
+        remaining = [x for x in full_pool if x["name"].lower() not in used]
         for x in remaining[:extra_count]:
             used.add(x["name"].lower())
             selected.append(x)
@@ -1134,26 +1093,14 @@ async def fetch_all_username_items():
     return items
 
 
-async def fetch_preferred_map_for_length(length_value: int, api_params: dict):
-    try:
-        return await fetch_pattern_preferred_map(length_value, api_params)
-    except Exception as e:
-        print(f"DEBUG PREFERRED MAP FAILED length={length_value}: {repr(e)}")
-        return {}
-
-
 async def main():
     ton_usd_rate = await fetch_ton_usd_rate()
 
     all_username_items = await fetch_all_username_items()
 
-    pref_map_5 = await fetch_preferred_map_for_length(5, USERNAMES_5_API_PARAMS)
-    pref_map_6 = await fetch_preferred_map_for_length(6, USERNAMES_6_API_PARAMS)
-    pref_map_7 = await fetch_preferred_map_for_length(7, USERNAMES_7_API_PARAMS)
-
-    section_5 = build_username_section(all_username_items, pref_map_5, 5)
-    section_6 = build_username_section(all_username_items, pref_map_6, 6)
-    section_7 = build_username_section(all_username_items, pref_map_7, 7)
+    section_5 = await build_username_section(all_username_items, 5, USERNAMES_5_API_PARAMS)
+    section_6 = await build_username_section(all_username_items, 6, USERNAMES_6_API_PARAMS)
+    section_7 = await build_username_section(all_username_items, 7, USERNAMES_7_API_PARAMS)
 
     number_floor = {}
     if NUMBERS_COLLECTION_ADDRESS:

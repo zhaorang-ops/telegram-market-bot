@@ -91,14 +91,17 @@ USERNAME_RULES = {
     ],
 }
 
+# 提速：先用 3 / 3 / 2
 USERNAME_EXTRA_COUNT = {
-    5: 6,
-    6: 6,
-    7: 6,
+    5: 3,
+    6: 3,
+    7: 2,
 }
 
 USERNAME_QUERY_ALPHA_CHARS = "abcdefghijklmnopqrstuvwxyz"
 USERNAME_QUERY_DIGIT_CHARS = ["6", "8", "9", "0", "1", "2", "3", "4", "5", "7"]
+
+QUERY_RESULT_CACHE = {}
 
 
 def build_promo_reply_markup():
@@ -176,22 +179,6 @@ def rule_match(clean: str, rule_name: str, run_len, kind: str) -> bool:
     return False
 
 
-def pick_closest_by_price(candidates, target_price):
-    if not candidates:
-        return None
-    if target_price is None or target_price <= 0:
-        return sort_items(candidates)[0]
-
-    return min(
-        candidates,
-        key=lambda x: (
-            abs(price_or_inf(x) - target_price),
-            price_or_inf(x),
-            x["name"].lower(),
-        ),
-    )
-
-
 def to_float(value, default=0.0):
     if value is None:
         return default
@@ -253,13 +240,18 @@ def add_or_replace_query(base_url: str, query_value: str) -> str:
 async def extract_first_row_from_page(page, expected_length: int):
     row_locator = page.locator("table tbody tr")
     count = await row_locator.count()
+
     if count == 0:
         row_locator = page.locator("tr")
         count = await row_locator.count()
 
     for i in range(count):
         row = row_locator.nth(i)
-        text = await row.inner_text()
+        try:
+            text = await row.inner_text()
+        except Exception:
+            continue
+
         if not text or "@" not in text:
             continue
 
@@ -295,28 +287,40 @@ async def extract_first_row_from_page(page, expected_length: int):
     return None
 
 
-async def fetch_query_result(browser, url: str, expected_length: int):
-    context = await browser.new_context()
-    page = await context.new_page()
+async def fetch_query_result(page, url: str, expected_length: int):
+    await page.goto(url, wait_until="domcontentloaded", timeout=15000)
 
-    try:
-        await page.goto(url, wait_until="domcontentloaded", timeout=30000)
-        await page.wait_for_timeout(3000)
+    selectors = [
+        "table tbody tr",
+        "tr",
+        "text=@",
+    ]
 
+    found = False
+    for sel in selectors:
         try:
-            await page.wait_for_selector("tr", timeout=10000)
+            await page.wait_for_selector(sel, timeout=3000)
+            found = True
+            break
         except PlaywrightTimeoutError:
             pass
 
-        result = await extract_first_row_from_page(page, expected_length)
-        return result
-    finally:
-        await context.close()
+    if not found:
+        return None
+
+    # 给前端一点点渲染时间，但不再傻等 3 秒
+    await page.wait_for_timeout(500)
+
+    return await extract_first_row_from_page(page, expected_length)
 
 
-async def fetch_best_match_by_query(browser, base_url: str, length_value: int, rule_name: str, run_len, kind: str):
+async def fetch_best_match_by_query(page, base_url: str, length_value: int, rule_name: str, run_len, kind: str):
     if not base_url:
         return None
+
+    cache_key = (base_url, length_value, rule_name, run_len, kind)
+    if cache_key in QUERY_RESULT_CACHE:
+        return QUERY_RESULT_CACHE[cache_key]
 
     if kind == "alpha":
         queries = [ch * run_len for ch in USERNAME_QUERY_ALPHA_CHARS]
@@ -325,145 +329,143 @@ async def fetch_best_match_by_query(browser, base_url: str, length_value: int, r
     elif kind == "fixed":
         queries = [rule_name]
     else:
+        QUERY_RESULT_CACHE[cache_key] = None
         return None
 
     for q in queries:
         url = add_or_replace_query(base_url, q)
         try:
-            result = await fetch_query_result(browser, url, length_value)
+            result = await fetch_query_result(page, url, length_value)
         except Exception as e:
             print(f"DEBUG PLAYWRIGHT FAIL length={length_value} rule={rule_name} query={q} error={repr(e)}")
             result = None
 
         if result and rule_match(username_clean(result["name"]), rule_name, run_len, kind):
             print(f"DEBUG PLAYWRIGHT HIT length={length_value} rule={rule_name} query={q} name={result['name']}")
+            QUERY_RESULT_CACHE[cache_key] = result
             return result
 
+    QUERY_RESULT_CACHE[cache_key] = None
     return None
 
 
-async def fetch_all_username_items():
-    # Playwright 版这里不再扫全站全量 API
-    return []
-
-
-async def build_username_section(browser, base_url: str, length_value: int):
+async def build_username_section(page, base_url: str, length_value: int):
     rules = USERNAME_RULES[length_value]
     extra_count = USERNAME_EXTRA_COUNT[length_value]
 
     selected = []
     used = set()
-    last_price = None
 
     for rule_name, run_len, kind in rules:
-        chosen = await fetch_best_match_by_query(browser, base_url, length_value, rule_name, run_len, kind)
+        chosen = await fetch_best_match_by_query(page, base_url, length_value, rule_name, run_len, kind)
 
         if chosen and chosen["name"].lower() in used:
             chosen = None
 
         if chosen is None:
-            # Playwright 精准查不到时，不补全站大抓取，直接跳过
             continue
 
         used.add(chosen["name"].lower())
         selected.append(chosen)
 
-        if chosen["ton_price"] > 0:
-            last_price = chosen["ton_price"]
+    # 补位也走复用 page
+    filler_queries = ["", "6", "8", "9", "0", "a", "b", "c"]
+    for q in filler_queries:
+        if len(selected) >= len(rules) + extra_count:
+            break
 
-    # 其余补位：继续按最低价思路，用通配 query 快速补
-    if extra_count > 0 and base_url:
-        filler_queries = [
-            "", "a", "e", "i", "o", "u",
-            "1", "6", "8", "9", "0",
-            "aa", "11", "66", "88",
-        ]
-        for q in filler_queries:
-            if len(selected) >= len(rules) + extra_count:
-                break
+        url = add_or_replace_query(base_url, q)
+        filler_key = (base_url, length_value, f"filler:{q}", None, "filler")
 
-            url = add_or_replace_query(base_url, q)
+        if filler_key in QUERY_RESULT_CACHE:
+            result = QUERY_RESULT_CACHE[filler_key]
+        else:
             try:
-                result = await fetch_query_result(browser, url, length_value)
+                result = await fetch_query_result(page, url, length_value)
             except Exception:
                 result = None
+            QUERY_RESULT_CACHE[filler_key] = result
 
-            if not result:
-                continue
-            if result["name"].lower() in used:
-                continue
+        if not result:
+            continue
+        if result["name"].lower() in used:
+            continue
 
-            used.add(result["name"].lower())
-            selected.append(result)
+        used.add(result["name"].lower())
+        selected.append(result)
 
     return selected[: len(rules) + extra_count]
 
 
-async def fetch_numbers_floor(browser, base_url: str):
+async def fetch_numbers_floor(page, base_url: str):
     if not base_url:
         return {"has4": None, "no4": None}
 
-    context = await browser.new_context()
-    page = await context.new_page()
+    await page.goto(base_url, wait_until="domcontentloaded", timeout=15000)
 
     try:
-        await page.goto(base_url, wait_until="domcontentloaded", timeout=30000)
-        await page.wait_for_timeout(3000)
+        await page.wait_for_selector("tr", timeout=3000)
+    except PlaywrightTimeoutError:
+        return {"has4": None, "no4": None}
 
-        rows = page.locator("table tbody tr")
+    await page.wait_for_timeout(500)
+
+    rows = page.locator("table tbody tr")
+    count = await rows.count()
+    if count == 0:
+        rows = page.locator("tr")
         count = await rows.count()
-        if count == 0:
-            rows = page.locator("tr")
-            count = await rows.count()
 
-        has4_item = None
-        no4_item = None
+    has4_item = None
+    no4_item = None
 
-        for i in range(count):
-            row = rows.nth(i)
+    for i in range(count):
+        row = rows.nth(i)
+        try:
             text = await row.inner_text()
-            if not text or "+888" not in text:
-                continue
+        except Exception:
+            continue
 
-            num_match = re.search(r"\+888[\s\d]{4,20}", text)
-            if not num_match:
-                continue
+        if not text or "+888" not in text:
+            continue
 
-            name = re.sub(r"\s+", " ", num_match.group(0)).strip()
-            ton_candidates = re.findall(r"(?<!\$)\b\d+(?:,\d{3})*(?:\.\d+)?\b", text)
-            ton_price = 0.0
-            for raw in ton_candidates:
-                val = to_float(raw, 0.0)
-                if val > 0:
-                    ton_price = val
-                    break
+        num_match = re.search(r"\+888[\s\d]{4,20}", text)
+        if not num_match:
+            continue
 
-            if ton_price <= 0:
-                continue
-
-            digits = re.sub(r"\D", "", name)
-            tail = digits[3:] if digits.startswith("888") else digits
-
-            item = {
-                "name": name,
-                "ton_price": ton_price,
-                "is_restricted": "restricted" in text.lower(),
-            }
-
-            if item["is_restricted"]:
-                continue
-
-            if "4" in tail and has4_item is None:
-                has4_item = item
-            if "4" not in tail and no4_item is None:
-                no4_item = item
-
-            if has4_item and no4_item:
+        name = re.sub(r"\s+", " ", num_match.group(0)).strip()
+        ton_candidates = re.findall(r"(?<!\$)\b\d+(?:,\d{3})*(?:\.\d+)?\b", text)
+        ton_price = 0.0
+        for raw in ton_candidates:
+            val = to_float(raw, 0.0)
+            if val > 0:
+                ton_price = val
                 break
 
-        return {"has4": has4_item, "no4": no4_item}
-    finally:
-        await context.close()
+        if ton_price <= 0:
+            continue
+
+        digits = re.sub(r"\D", "", name)
+        tail = digits[3:] if digits.startswith("888") else digits
+
+        item = {
+            "name": name,
+            "ton_price": ton_price,
+            "is_restricted": "restricted" in text.lower(),
+        }
+
+        if item["is_restricted"]:
+            continue
+
+        if "4" in tail and has4_item is None:
+            has4_item = item
+        if "4" not in tail and no4_item is None:
+            no4_item = item
+
+        if has4_item and no4_item:
+            break
+
+    return {"has4": has4_item, "no4": no4_item}
 
 
 def build_usernames_message(section_5, section_6, section_7, ton_usd_rate):
@@ -631,19 +633,36 @@ async def upsert_message(chat_id: str, message_id, text: str, label: str, parse_
     print(f"IMPORTANT: Update {label} secret to:", new_message_id)
 
 
+async def handle_route(route):
+    if route.request.resource_type in ["image", "font", "media"]:
+        await route.abort()
+    else:
+        await route.continue_()
+
+
 async def main():
     ton_usd_rate = await fetch_ton_usd_rate()
 
     async with async_playwright() as p:
         browser = await p.chromium.launch(headless=True)
+        context = await browser.new_context(service_workers="block")
+        await context.route("**/*", handle_route)
+
+        page5 = await context.new_page()
+        page6 = await context.new_page()
+        page7 = await context.new_page()
+        page_num = await context.new_page()
 
         try:
-            section_5 = await build_username_section(browser, USERNAMES_5_URL, 5) if USERNAMES_5_URL else []
-            section_6 = await build_username_section(browser, USERNAMES_6_URL, 6) if USERNAMES_6_URL else []
-            section_7 = await build_username_section(browser, USERNAMES_7_URL, 7) if USERNAMES_7_URL else []
+            section_5, section_6, section_7 = await asyncio.gather(
+                build_username_section(page5, USERNAMES_5_URL, 5) if USERNAMES_5_URL else asyncio.sleep(0, result=[]),
+                build_username_section(page6, USERNAMES_6_URL, 6) if USERNAMES_6_URL else asyncio.sleep(0, result=[]),
+                build_username_section(page7, USERNAMES_7_URL, 7) if USERNAMES_7_URL else asyncio.sleep(0, result=[]),
+            )
 
-            number_floor = await fetch_numbers_floor(browser, NUMBERS_URL) if NUMBERS_URL else {"has4": None, "no4": None}
+            number_floor = await fetch_numbers_floor(page_num, NUMBERS_URL) if NUMBERS_URL else {"has4": None, "no4": None}
         finally:
+            await context.close()
             await browser.close()
 
     usernames_text = build_usernames_message(section_5, section_6, section_7, ton_usd_rate)

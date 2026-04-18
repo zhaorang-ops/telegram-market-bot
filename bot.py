@@ -68,11 +68,8 @@ def marketapp_api_params_from_url(url: str):
         "query",
         "sort_by",
         "filter_by",
-        "market_filter_by",
         "min_price",
         "max_price",
-        "view",
-        "tab",
     ]
     for key in single_keys:
         values = qs.get(key, [])
@@ -123,6 +120,7 @@ NUMBERS_COLLECTION_ADDRESS = normalize_collection_address(
 
 TZ = ZoneInfo(os.environ.get("TZ", "Asia/Shanghai"))
 MAX_PAGES = int(os.environ.get("MAX_PAGES", "120"))
+MAX_QUERY_PAGES = int(os.environ.get("MAX_QUERY_PAGES", "2"))
 
 USERNAME_ADD_USD = {
     5: 50.0,
@@ -137,6 +135,7 @@ NUMBER_ADD_USD = {
 
 USERNAME_RE = re.compile(r"^@?[A-Za-z0-9_]{4,32}$")
 NUMBER_RE = re.compile(r"^\+?\d[\d\s]{6,}$")
+USERNAME_QUERY_CHARS = "abcdefghijklmnopqrstuvwxyz0123456789"
 
 PROMO_BUTTON_TEXT = "联系客服"
 PROMO_BUTTON_URL = "https://t.me/daimei1"
@@ -153,7 +152,6 @@ PROMO_MESSAGE_HTML = """
 
 官方多用户名可和礼物增加账号权重不易被封<tg-emoji emoji-id="5220166546491459639">🔥</tg-emoji>招牌11年防注销老号，注册超过11年的飞机号，超级无敌螺旋盖亚聚变核能耐操。
 """.strip()
-
 
 USERNAME_PATTERN_CONFIG = {
     5: {
@@ -557,7 +555,7 @@ async def safe_get(client, url, headers, params, retries=3, fail_soft=False):
     raise last_error
 
 
-async def fetch_collection_items(collection_address: str, mode: str, extra_params=None, fail_soft=False):
+async def fetch_collection_items(collection_address: str, mode: str, extra_params=None, fail_soft=False, page_limit=None):
     if not collection_address:
         return []
 
@@ -573,9 +571,10 @@ async def fetch_collection_items(collection_address: str, mode: str, extra_param
     extra_params = dict(extra_params or {})
 
     timeout = httpx.Timeout(connect=20.0, read=60.0, write=30.0, pool=60.0)
+    total_pages = page_limit or MAX_PAGES
 
     async with httpx.AsyncClient(timeout=timeout, follow_redirects=True) as client:
-        for page_no in range(1, MAX_PAGES + 1):
+        for page_no in range(1, total_pages + 1):
             params = {
                 "limit": 100,
                 "filter_by": extra_params.get("filter_by", "onsale"),
@@ -638,16 +637,7 @@ async def fetch_collection_items(collection_address: str, mode: str, extra_param
                 if not item:
                     continue
 
-                dedupe_key = item["name"].lower()
-                old = items_map.get(dedupe_key)
-
-                if old is None:
-                    items_map[dedupe_key] = item
-                else:
-                    old_price = old["ton_price"] if old["ton_price"] > 0 else 10**18
-                    new_price = item["ton_price"] if item["ton_price"] > 0 else 10**18
-                    if new_price < old_price:
-                        items_map[dedupe_key] = item
+                merge_lowest_price_item(items_map, item)
 
             after_count = len(items_map)
             added_count = after_count - before_count
@@ -697,6 +687,40 @@ def sort_items(items):
             x["name"].lower(),
         )
     )
+
+
+def merge_lowest_price_item(items_map, item):
+    key = item["name"].lower()
+    old = items_map.get(key)
+    if old is None:
+        items_map[key] = item
+        return
+
+    old_price = old["ton_price"] if old["ton_price"] > 0 else 10**18
+    new_price = item["ton_price"] if item["ton_price"] > 0 else 10**18
+    if new_price < old_price:
+        items_map[key] = item
+
+
+def max_a_run(pattern: str) -> int:
+    best = 0
+    cur = 0
+    for ch in pattern:
+        if ch == "a":
+            cur += 1
+            best = max(best, cur)
+        else:
+            cur = 0
+    return best
+
+
+def pattern_total_a(pattern: str) -> int:
+    return pattern.count("a")
+
+
+def pattern_query_lengths(pattern: str):
+    lengths = {max_a_run(pattern), pattern_total_a(pattern)}
+    return sorted(x for x in lengths if x >= 2)
 
 
 def match_pattern(clean: str, pattern: str) -> bool:
@@ -773,7 +797,67 @@ def pick_with_preference(preferred_pool, full_pool, predicate, used, last_price)
     return None
 
 
-def build_username_section(all_items, preferred_items, length_value: int):
+async def fetch_query_pool_for_length(length_value: int, query_len: int, base_params: dict):
+    params_base = dict(base_params or {})
+    params_base["filter_by"] = "onsale"
+
+    attrs = list(params_base.get("attrs", []))
+    need_attr = f"Length~{length_value}"
+    if need_attr not in attrs:
+        attrs.append(need_attr)
+    params_base["attrs"] = attrs
+
+    merged = {}
+
+    for ch in USERNAME_QUERY_CHARS:
+        params = dict(params_base)
+        params["query"] = ch * query_len
+
+        items = await fetch_collection_items(
+            USERNAMES_COLLECTION_ADDRESS,
+            mode="usernames",
+            extra_params=params,
+            fail_soft=True,
+            page_limit=MAX_QUERY_PAGES,
+        )
+
+        for item in items:
+            if item["length"] == length_value:
+                merge_lowest_price_item(merged, item)
+
+    result = sort_items(list(merged.values()))
+    print(f"DEBUG QUERY_POOL length={length_value} query_len={query_len} count={len(result)}")
+    return result
+
+
+async def fetch_pattern_preferred_map(length_value: int, base_params: dict):
+    patterns = list(dict.fromkeys(USERNAME_PATTERN_CONFIG[length_value]["patterns"]))
+
+    needed_query_lens = sorted({
+        ql
+        for pattern in patterns
+        for ql in pattern_query_lengths(pattern)
+    })
+
+    query_pools = {}
+    for ql in needed_query_lens:
+        query_pools[ql] = await fetch_query_pool_for_length(length_value, ql, base_params)
+
+    preferred_by_pattern = {}
+    for pattern in patterns:
+        merged = {}
+        for ql in pattern_query_lengths(pattern):
+            for item in query_pools.get(ql, []):
+                if match_pattern(username_clean(item["name"]), pattern):
+                    merge_lowest_price_item(merged, item)
+
+        preferred_by_pattern[pattern] = sort_items(list(merged.values()))
+        print(f"DEBUG PATTERN length={length_value} pattern={pattern} preferred={len(preferred_by_pattern[pattern])}")
+
+    return preferred_by_pattern
+
+
+def build_username_section(all_items, preferred_by_pattern, length_value: int):
     config = USERNAME_PATTERN_CONFIG[length_value]
     patterns = config["patterns"]
     extra_count = config["extra_count"]
@@ -784,17 +868,13 @@ def build_username_section(all_items, preferred_items, length_value: int):
         and not (x["is_on_sale"] is False and x["ton_price"] <= 0)
     ])
 
-    preferred_pool = sort_items([
-        x for x in preferred_items
-        if x["length"] == length_value
-        and not (x["is_on_sale"] is False and x["ton_price"] <= 0)
-    ])
-
     used = set()
     selected = []
     last_price = None
 
     for pattern in patterns:
+        preferred_pool = preferred_by_pattern.get(pattern, [])
+
         chosen = pick_with_preference(
             preferred_pool,
             full_pool,
@@ -811,26 +891,13 @@ def build_username_section(all_items, preferred_items, length_value: int):
             last_price = chosen["ton_price"]
 
     if extra_count > 0:
-        preferred_remaining = [
-            x for x in preferred_pool
+        remaining = [
+            x for x in full_pool
             if x["name"].lower() not in used
         ]
-        for x in sort_items(preferred_remaining):
-            if len(selected) >= len(patterns) + extra_count:
-                break
+        for x in remaining[:extra_count]:
             used.add(x["name"].lower())
             selected.append(x)
-
-        if len(selected) < len(patterns) + extra_count:
-            full_remaining = [
-                x for x in full_pool
-                if x["name"].lower() not in used
-            ]
-            for x in sort_items(full_remaining):
-                if len(selected) >= len(patterns) + extra_count:
-                    break
-                used.add(x["name"].lower())
-                selected.append(x)
 
     return selected
 
@@ -1056,44 +1123,37 @@ async def upsert_message(chat_id: str, message_id, text: str, label: str, parse_
     print(f"IMPORTANT: Update {label} secret to:", new_message_id)
 
 
-async def fetch_usernames_with_fallback(length_value: int, url_api_params: dict):
-    preferred_items = []
-    if url_api_params:
-        try:
-            preferred_items = await fetch_collection_items(
-                USERNAMES_COLLECTION_ADDRESS,
-                mode="usernames",
-                extra_params=url_api_params,
-                fail_soft=True,
-            )
-            preferred_items = [x for x in preferred_items if x["length"] == length_value]
-            print(f"DEBUG PREFERRED length={length_value} count={len(preferred_items)} params={url_api_params}")
-        except Exception as e:
-            print(f"DEBUG PREFERRED FAILED length={length_value}: {repr(e)}")
-            preferred_items = []
-
-    all_items = await fetch_collection_items(
+async def fetch_all_username_items():
+    items = await fetch_collection_items(
         USERNAMES_COLLECTION_ADDRESS,
         mode="usernames",
         extra_params={},
         fail_soft=False,
     )
-    all_items = [x for x in all_items if x["length"] == length_value]
-    print(f"DEBUG FULL length={length_value} count={len(all_items)}")
+    print(f"DEBUG FULL USERNAMES TOTAL={len(items)}")
+    return items
 
-    return preferred_items, all_items
+
+async def fetch_preferred_map_for_length(length_value: int, api_params: dict):
+    try:
+        return await fetch_pattern_preferred_map(length_value, api_params)
+    except Exception as e:
+        print(f"DEBUG PREFERRED MAP FAILED length={length_value}: {repr(e)}")
+        return {}
 
 
 async def main():
     ton_usd_rate = await fetch_ton_usd_rate()
 
-    pref_5, all_5 = await fetch_usernames_with_fallback(5, USERNAMES_5_API_PARAMS)
-    pref_6, all_6 = await fetch_usernames_with_fallback(6, USERNAMES_6_API_PARAMS)
-    pref_7, all_7 = await fetch_usernames_with_fallback(7, USERNAMES_7_API_PARAMS)
+    all_username_items = await fetch_all_username_items()
 
-    section_5 = build_username_section(all_5, pref_5, 5)
-    section_6 = build_username_section(all_6, pref_6, 6)
-    section_7 = build_username_section(all_7, pref_7, 7)
+    pref_map_5 = await fetch_preferred_map_for_length(5, USERNAMES_5_API_PARAMS)
+    pref_map_6 = await fetch_preferred_map_for_length(6, USERNAMES_6_API_PARAMS)
+    pref_map_7 = await fetch_preferred_map_for_length(7, USERNAMES_7_API_PARAMS)
+
+    section_5 = build_username_section(all_username_items, pref_map_5, 5)
+    section_6 = build_username_section(all_username_items, pref_map_6, 6)
+    section_7 = build_username_section(all_username_items, pref_map_7, 7)
 
     number_floor = {}
     if NUMBERS_COLLECTION_ADDRESS:

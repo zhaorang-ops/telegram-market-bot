@@ -44,5 +44,6 @@ jobs:
 
           TZ: "Asia/Shanghai"
           MAX_PAGES: "100"
+          MAX_QUERY_PAGES: "2"
 
         run: python bot.py

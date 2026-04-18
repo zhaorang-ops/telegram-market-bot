@@ -71,6 +71,8 @@ def marketapp_api_params_from_url(url: str):
         "market_filter_by",
         "min_price",
         "max_price",
+        "view",
+        "tab",
     ]
     for key in single_keys:
         values = qs.get(key, [])
@@ -120,7 +122,7 @@ NUMBERS_COLLECTION_ADDRESS = normalize_collection_address(
 )
 
 TZ = ZoneInfo(os.environ.get("TZ", "Asia/Shanghai"))
-MAX_PAGES = int(os.environ.get("MAX_PAGES", "200"))
+MAX_PAGES = int(os.environ.get("MAX_PAGES", "120"))
 
 USERNAME_ADD_USD = {
     5: 50.0,
@@ -535,6 +537,26 @@ async def fetch_ton_usd_rate():
         return 0.0
 
 
+async def safe_get(client, url, headers, params, retries=3, fail_soft=False):
+    last_error = None
+
+    for attempt in range(1, retries + 1):
+        try:
+            resp = await client.get(url, headers=headers, params=params)
+            return resp
+        except (httpx.ConnectTimeout, httpx.ReadTimeout, httpx.ConnectError) as e:
+            last_error = e
+            print(f"DEBUG HTTP RETRY {attempt}/{retries} params={params} error={repr(e)}")
+            if attempt < retries:
+                await asyncio.sleep(attempt * 2)
+
+    if fail_soft:
+        print(f"DEBUG HTTP FAIL_SOFT params={params} error={repr(last_error)}")
+        return None
+
+    raise last_error
+
+
 async def fetch_collection_items(collection_address: str, mode: str, extra_params=None, fail_soft=False):
     if not collection_address:
         return []
@@ -550,7 +572,9 @@ async def fetch_collection_items(collection_address: str, mode: str, extra_param
     no_new_pages = 0
     extra_params = dict(extra_params or {})
 
-    async with httpx.AsyncClient(timeout=30) as client:
+    timeout = httpx.Timeout(connect=20.0, read=60.0, write=30.0, pool=60.0)
+
+    async with httpx.AsyncClient(timeout=timeout, follow_redirects=True) as client:
         for page_no in range(1, MAX_PAGES + 1):
             params = {
                 "limit": 100,
@@ -569,7 +593,17 @@ async def fetch_collection_items(collection_address: str, mode: str, extra_param
             if cursor:
                 params["cursor"] = cursor
 
-            resp = await client.get(api_url, headers=headers, params=params)
+            resp = await safe_get(
+                client,
+                api_url,
+                headers=headers,
+                params=params,
+                retries=3,
+                fail_soft=fail_soft,
+            )
+
+            if resp is None:
+                return []
 
             if resp.status_code == 400:
                 body_text = resp.text[:5000]
@@ -782,7 +816,7 @@ def build_username_section(all_items, preferred_items, length_value: int):
             if x["name"].lower() not in used
         ]
         for x in sort_items(preferred_remaining):
-            if len([i for i in selected]) >= len(patterns) + extra_count:
+            if len(selected) >= len(patterns) + extra_count:
                 break
             used.add(x["name"].lower())
             selected.append(x)
@@ -1025,14 +1059,18 @@ async def upsert_message(chat_id: str, message_id, text: str, label: str, parse_
 async def fetch_usernames_with_fallback(length_value: int, url_api_params: dict):
     preferred_items = []
     if url_api_params:
-        preferred_items = await fetch_collection_items(
-            USERNAMES_COLLECTION_ADDRESS,
-            mode="usernames",
-            extra_params=url_api_params,
-            fail_soft=True,
-        )
-        preferred_items = [x for x in preferred_items if x["length"] == length_value]
-        print(f"DEBUG PREFERRED length={length_value} count={len(preferred_items)} params={url_api_params}")
+        try:
+            preferred_items = await fetch_collection_items(
+                USERNAMES_COLLECTION_ADDRESS,
+                mode="usernames",
+                extra_params=url_api_params,
+                fail_soft=True,
+            )
+            preferred_items = [x for x in preferred_items if x["length"] == length_value]
+            print(f"DEBUG PREFERRED length={length_value} count={len(preferred_items)} params={url_api_params}")
+        except Exception as e:
+            print(f"DEBUG PREFERRED FAILED length={length_value}: {repr(e)}")
+            preferred_items = []
 
     all_items = await fetch_collection_items(
         USERNAMES_COLLECTION_ADDRESS,

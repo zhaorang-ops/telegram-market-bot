@@ -28,6 +28,14 @@ NUMBERS_URL = os.environ.get("NUMBERS_URL", "").strip()
 
 TZ = ZoneInfo(os.environ.get("TZ", "Asia/Shanghai"))
 
+# 为了提速，这里先用较少补位
+# 想补更多，把这里改大
+USERNAME_EXTRA_COUNT = {
+    5: 2,
+    6: 2,
+    7: 1,
+}
+
 USERNAME_ADD_USD = {
     5: 50.0,
     6: 50.0,
@@ -91,17 +99,26 @@ USERNAME_RULES = {
     ],
 }
 
-# 提速：先用 3 / 3 / 2
-USERNAME_EXTRA_COUNT = {
-    5: 3,
-    6: 3,
-    7: 2,
-}
-
 USERNAME_QUERY_ALPHA_CHARS = "abcdefghijklmnopqrstuvwxyz"
 USERNAME_QUERY_DIGIT_CHARS = ["6", "8", "9", "0", "1", "2", "3", "4", "5", "7"]
 
 QUERY_RESULT_CACHE = {}
+
+SEARCH_INPUT_SELECTORS = [
+    'input[placeholder*="NFT"]',
+    'input[placeholder*="name"]',
+    'input[placeholder*="Name"]',
+    'input[placeholder*="Enter"]',
+    'input[type="text"]',
+]
+
+ROW_SELECTORS = [
+    "table tbody tr",
+    "tr",
+]
+
+RESULT_WAIT_MS = 900
+PAGE_READY_TIMEOUT_MS = 2500
 
 
 def build_promo_reply_markup():
@@ -237,6 +254,17 @@ def add_or_replace_query(base_url: str, query_value: str) -> str:
     return f"{base_url}{sep}query={quote(query_value)}"
 
 
+async def get_search_box(page):
+    for sel in SEARCH_INPUT_SELECTORS:
+        locator = page.locator(sel).first
+        try:
+            await locator.wait_for(timeout=1500)
+            return locator
+        except Exception:
+            pass
+    return None
+
+
 async def extract_first_row_from_page(page, expected_length: int):
     row_locator = page.locator("table tbody tr")
     count = await row_locator.count()
@@ -265,12 +293,11 @@ async def extract_first_row_from_page(page, expected_length: int):
 
         ton_candidates = re.findall(r"(?<!\$)\b\d+(?:,\d{3})*(?:\.\d+)?\b", text)
         ton_price = 0.0
-        if ton_candidates:
-            for raw in ton_candidates:
-                val = to_float(raw, 0.0)
-                if val > 0:
-                    ton_price = val
-                    break
+        for raw in ton_candidates:
+            val = to_float(raw, 0.0)
+            if val > 0:
+                ton_price = val
+                break
 
         if ton_price <= 0:
             continue
@@ -287,38 +314,40 @@ async def extract_first_row_from_page(page, expected_length: int):
     return None
 
 
-async def fetch_query_result(page, url: str, expected_length: int):
-    await page.goto(url, wait_until="domcontentloaded", timeout=15000)
-
-    selectors = [
-        "table tbody tr",
-        "tr",
-        "text=@",
-    ]
-
-    found = False
-    for sel in selectors:
+async def wait_rows_ready(page):
+    for sel in ROW_SELECTORS:
         try:
-            await page.wait_for_selector(sel, timeout=3000)
-            found = True
-            break
+            await page.wait_for_selector(sel, timeout=PAGE_READY_TIMEOUT_MS)
+            return True
         except PlaywrightTimeoutError:
             pass
+    return False
 
-    if not found:
+
+async def fetch_query_result(page, query_value: str, expected_length: int):
+    search_box = await get_search_box(page)
+    if search_box is None:
         return None
 
-    # 给前端一点点渲染时间，但不再傻等 3 秒
-    await page.wait_for_timeout(500)
+    try:
+        await search_box.click()
+        await search_box.fill("")
+        if query_value:
+            await search_box.fill(query_value)
 
-    return await extract_first_row_from_page(page, expected_length)
+        await page.wait_for_timeout(RESULT_WAIT_MS)
 
+        ready = await wait_rows_ready(page)
+        if not ready:
+            return None
 
-async def fetch_best_match_by_query(page, base_url: str, length_value: int, rule_name: str, run_len, kind: str):
-    if not base_url:
+        return await extract_first_row_from_page(page, expected_length)
+    except Exception:
         return None
 
-    cache_key = (base_url, length_value, rule_name, run_len, kind)
+
+async def fetch_best_match_by_query(page, length_value: int, rule_name: str, run_len, kind: str):
+    cache_key = (length_value, rule_name, run_len, kind)
     if cache_key in QUERY_RESULT_CACHE:
         return QUERY_RESULT_CACHE[cache_key]
 
@@ -333,15 +362,9 @@ async def fetch_best_match_by_query(page, base_url: str, length_value: int, rule
         return None
 
     for q in queries:
-        url = add_or_replace_query(base_url, q)
-        try:
-            result = await fetch_query_result(page, url, length_value)
-        except Exception as e:
-            print(f"DEBUG PLAYWRIGHT FAIL length={length_value} rule={rule_name} query={q} error={repr(e)}")
-            result = None
-
+        result = await fetch_query_result(page, q, length_value)
         if result and rule_match(username_clean(result["name"]), rule_name, run_len, kind):
-            print(f"DEBUG PLAYWRIGHT HIT length={length_value} rule={rule_name} query={q} name={result['name']}")
+            print(f"DEBUG INPUT HIT length={length_value} rule={rule_name} query={q} name={result['name']}")
             QUERY_RESULT_CACHE[cache_key] = result
             return result
 
@@ -353,11 +376,17 @@ async def build_username_section(page, base_url: str, length_value: int):
     rules = USERNAME_RULES[length_value]
     extra_count = USERNAME_EXTRA_COUNT[length_value]
 
+    if not base_url:
+        return []
+
+    await page.goto(base_url, wait_until="domcontentloaded", timeout=15000)
+    await page.wait_for_timeout(1200)
+
     selected = []
     used = set()
 
     for rule_name, run_len, kind in rules:
-        chosen = await fetch_best_match_by_query(page, base_url, length_value, rule_name, run_len, kind)
+        chosen = await fetch_best_match_by_query(page, length_value, rule_name, run_len, kind)
 
         if chosen and chosen["name"].lower() in used:
             chosen = None
@@ -368,22 +397,16 @@ async def build_username_section(page, base_url: str, length_value: int):
         used.add(chosen["name"].lower())
         selected.append(chosen)
 
-    # 补位也走复用 page
-    filler_queries = ["", "6", "8", "9", "0", "a", "b", "c"]
+    filler_queries = ["", "6", "8", "9", "0", "a", "b"]
     for q in filler_queries:
         if len(selected) >= len(rules) + extra_count:
             break
 
-        url = add_or_replace_query(base_url, q)
-        filler_key = (base_url, length_value, f"filler:{q}", None, "filler")
-
+        filler_key = (length_value, f"filler:{q}")
         if filler_key in QUERY_RESULT_CACHE:
             result = QUERY_RESULT_CACHE[filler_key]
         else:
-            try:
-                result = await fetch_query_result(page, url, length_value)
-            except Exception:
-                result = None
+            result = await fetch_query_result(page, q, length_value)
             QUERY_RESULT_CACHE[filler_key] = result
 
         if not result:
@@ -402,10 +425,8 @@ async def fetch_numbers_floor(page, base_url: str):
         return {"has4": None, "no4": None}
 
     await page.goto(base_url, wait_until="domcontentloaded", timeout=15000)
-
-    try:
-        await page.wait_for_selector("tr", timeout=3000)
-    except PlaywrightTimeoutError:
+    ready = await wait_rows_ready(page)
+    if not ready:
         return {"has4": None, "no4": None}
 
     await page.wait_for_timeout(500)

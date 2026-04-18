@@ -91,7 +91,7 @@ USERNAME_RULES = {
     ],
 }
 
-# 提速：补位先减到 3 / 3 / 2
+# 提速：先用 3 / 3 / 2
 USERNAME_EXTRA_COUNT = {
     5: 3,
     6: 3,
@@ -101,7 +101,6 @@ USERNAME_EXTRA_COUNT = {
 USERNAME_QUERY_ALPHA_CHARS = "abcdefghijklmnopqrstuvwxyz"
 USERNAME_QUERY_DIGIT_CHARS = ["6", "8", "9", "0", "1", "2", "3", "4", "5", "7"]
 
-# 缓存 query 结果，避免重复查同一个 query
 QUERY_RESULT_CACHE = {}
 
 
@@ -291,10 +290,26 @@ async def extract_first_row_from_page(page, expected_length: int):
 async def fetch_query_result(page, url: str, expected_length: int):
     await page.goto(url, wait_until="domcontentloaded", timeout=15000)
 
-    try:
-        await page.wait_for_selector("tr", timeout=2500)
-    except PlaywrightTimeoutError:
+    selectors = [
+        "table tbody tr",
+        "tr",
+        "text=@",
+    ]
+
+    found = False
+    for sel in selectors:
+        try:
+            await page.wait_for_selector(sel, timeout=3000)
+            found = True
+            break
+        except PlaywrightTimeoutError:
+            pass
+
+    if not found:
         return None
+
+    # 给前端一点点渲染时间，但不再傻等 3 秒
+    await page.wait_for_timeout(500)
 
     return await extract_first_row_from_page(page, expected_length)
 
@@ -353,32 +368,31 @@ async def build_username_section(page, base_url: str, length_value: int):
         used.add(chosen["name"].lower())
         selected.append(chosen)
 
-    # 提速：补位 query 也缩短
-    if extra_count > 0 and base_url:
-        filler_queries = ["", "6", "8", "9", "0", "a", "b", "c"]
-        for q in filler_queries:
-            if len(selected) >= len(rules) + extra_count:
-                break
+    # 补位也走复用 page
+    filler_queries = ["", "6", "8", "9", "0", "a", "b", "c"]
+    for q in filler_queries:
+        if len(selected) >= len(rules) + extra_count:
+            break
 
-            url = add_or_replace_query(base_url, q)
-            cache_key = (base_url, length_value, f"filler:{q}", None, "filler")
+        url = add_or_replace_query(base_url, q)
+        filler_key = (base_url, length_value, f"filler:{q}", None, "filler")
 
-            if cache_key in QUERY_RESULT_CACHE:
-                result = QUERY_RESULT_CACHE[cache_key]
-            else:
-                try:
-                    result = await fetch_query_result(page, url, length_value)
-                except Exception:
-                    result = None
-                QUERY_RESULT_CACHE[cache_key] = result
+        if filler_key in QUERY_RESULT_CACHE:
+            result = QUERY_RESULT_CACHE[filler_key]
+        else:
+            try:
+                result = await fetch_query_result(page, url, length_value)
+            except Exception:
+                result = None
+            QUERY_RESULT_CACHE[filler_key] = result
 
-            if not result:
-                continue
-            if result["name"].lower() in used:
-                continue
+        if not result:
+            continue
+        if result["name"].lower() in used:
+            continue
 
-            used.add(result["name"].lower())
-            selected.append(result)
+        used.add(result["name"].lower())
+        selected.append(result)
 
     return selected[: len(rules) + extra_count]
 
@@ -393,6 +407,8 @@ async def fetch_numbers_floor(page, base_url: str):
         await page.wait_for_selector("tr", timeout=3000)
     except PlaywrightTimeoutError:
         return {"has4": None, "no4": None}
+
+    await page.wait_for_timeout(500)
 
     rows = page.locator("table tbody tr")
     count = await rows.count()

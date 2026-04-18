@@ -36,9 +36,10 @@ jobs:
           PROMO_CHAT_ID: ${{ secrets.PROMO_CHAT_ID }}
           PROMO_MESSAGE_ID: ${{ secrets.PROMO_MESSAGE_ID }}
 
-          USERNAMES_5_URL: "https://marketapp.ws/collection/EQCA14o1-VWhS2efqoh_9M1b_A9DtKTuoqfmkn83AbJzwnPi/?tab=nfts&sort_by=next_bid_desc&filter_by=sale&view=list&market_filter_by=any&attrs=Length%7E5"
-          USERNAMES_6_URL: "https://marketapp.ws/collection/EQCA14o1-VWhS2efqoh_9M1b_A9DtKTuoqfmkn83AbJzwnPi/?tab=nfts&view=list&query=&sort_by=price_asc&filter_by=sale&market_filter_by=any&min_price=&max_price=&attrs=Length%7E6"
-
+          USERNAMES_5_URL: "https://marketapp.ws/collection/EQCA14o1-VWhS2efqoh_9M1b_A9DtKTuoqfmkn83AbJzwnPi/?tab=nfts&view=list&filter_by=sale&sort_by=price_asc&market_filter_by=any&attrs=Length%7E5&query="
+          USERNAMES_6_URL: "https://marketapp.ws/collection/EQCA14o1-VWhS2efqoh_9M1b_A9DtKTuoqfmkn83AbJzwnPi/?tab=nfts&view=list&filter_by=sale&sort_by=price_asc&market_filter_by=any&attrs=Length%7E6&query="
+          USERNAMES_7_URL: "https://marketapp.ws/collection/EQCA14o1-VWhS2efqoh_9M1b_A9DtKTuoqfmkn83AbJzwnPi/?tab=nfts&view=list&filter_by=sale&sort_by=price_asc&market_filter_by=any&attrs=Length%7E7&query="
+          
           NUMBERS_COLLECTION_ADDRESS: "https://marketapp.ws/collection/EQAOQdwdw8kGftJCSFgOErM1mBjYPe4DBPq8-AhF6vr9si5N/"
 
           TZ: "Asia/Shanghai"

@@ -54,6 +54,36 @@ def parse_marketapp_url(url: str):
     }
 
 
+def marketapp_api_params_from_url(url: str):
+    url = (url or "").strip()
+    if not url:
+        return {}
+
+    parsed = urlparse(url)
+    qs = parse_qs(parsed.query)
+
+    out = {}
+
+    single_keys = [
+        "query",
+        "sort_by",
+        "filter_by",
+        "market_filter_by",
+        "min_price",
+        "max_price",
+    ]
+    for key in single_keys:
+        values = qs.get(key, [])
+        if values and values[0] != "":
+            out[key] = values[0]
+
+    attrs = qs.get("attrs", [])
+    if attrs:
+        out["attrs"] = attrs
+
+    return out
+
+
 BOT_TOKEN = os.environ["BOT_TOKEN"].strip()
 MARKETAPP_API_TOKEN = os.environ["MARKETAPP_API_TOKEN"].strip()
 
@@ -68,13 +98,20 @@ PROMO_MESSAGE_ID = parse_message_id(os.environ.get("PROMO_MESSAGE_ID", "0"))
 
 USERNAMES_5_URL = os.environ.get("USERNAMES_5_URL", "").strip()
 USERNAMES_6_URL = os.environ.get("USERNAMES_6_URL", "").strip()
+USERNAMES_7_URL = os.environ.get("USERNAMES_7_URL", "").strip()
 
 USERNAMES_5_INFO = parse_marketapp_url(USERNAMES_5_URL)
 USERNAMES_6_INFO = parse_marketapp_url(USERNAMES_6_URL)
+USERNAMES_7_INFO = parse_marketapp_url(USERNAMES_7_URL)
+
+USERNAMES_5_API_PARAMS = marketapp_api_params_from_url(USERNAMES_5_URL)
+USERNAMES_6_API_PARAMS = marketapp_api_params_from_url(USERNAMES_6_URL)
+USERNAMES_7_API_PARAMS = marketapp_api_params_from_url(USERNAMES_7_URL)
 
 USERNAMES_COLLECTION_ADDRESS = (
     USERNAMES_5_INFO["collection_address"]
     or USERNAMES_6_INFO["collection_address"]
+    or USERNAMES_7_INFO["collection_address"]
     or "EQCA14o1-VWhS2efqoh_9M1b_A9DtKTuoqfmkn83AbJzwnPi"
 )
 
@@ -498,7 +535,7 @@ async def fetch_ton_usd_rate():
         return 0.0
 
 
-async def fetch_collection_items(collection_address: str, mode: str):
+async def fetch_collection_items(collection_address: str, mode: str, extra_params=None, fail_soft=False):
     if not collection_address:
         return []
 
@@ -511,13 +548,24 @@ async def fetch_collection_items(collection_address: str, mode: str):
     cursor = None
     items_map = {}
     no_new_pages = 0
+    extra_params = dict(extra_params or {})
 
     async with httpx.AsyncClient(timeout=30) as client:
         for page_no in range(1, MAX_PAGES + 1):
             params = {
                 "limit": 100,
-                "filter_by": "onsale",
+                "filter_by": extra_params.get("filter_by", "onsale"),
             }
+
+            for key, value in extra_params.items():
+                if key in {"limit", "cursor", "filter_by"}:
+                    continue
+                if value is None:
+                    continue
+                if isinstance(value, str) and value == "":
+                    continue
+                params[key] = value
+
             if cursor:
                 params["cursor"] = cursor
 
@@ -528,9 +576,15 @@ async def fetch_collection_items(collection_address: str, mode: str):
                 if "Invalid cursor format" in body_text:
                     print(f"DEBUG {mode.upper()} STOP invalid cursor at page {page_no}")
                     break
+                if fail_soft:
+                    print(f"DEBUG {mode.upper()} FAIL_SOFT 400 page {page_no}: {body_text[:200]}")
+                    return []
                 resp.raise_for_status()
 
             if resp.status_code >= 400:
+                if fail_soft:
+                    print(f"DEBUG {mode.upper()} FAIL_SOFT {resp.status_code} page {page_no}: {resp.text[:200]}")
+                    return []
                 resp.raise_for_status()
 
             payload = resp.json()
@@ -563,7 +617,7 @@ async def fetch_collection_items(collection_address: str, mode: str):
 
             after_count = len(items_map)
             added_count = after_count - before_count
-            print(f"DEBUG {mode.upper()} PAGE {page_no}: raw={len(raw_items)} new_unique={added_count} total={after_count}")
+            print(f"DEBUG {mode.upper()} PAGE {page_no}: raw={len(raw_items)} new_unique={added_count} total={after_count} params={extra_params}")
 
             if added_count == 0:
                 no_new_pages += 1
@@ -653,35 +707,67 @@ def pick_closest_by_price(candidates, target_price):
     )
 
 
-def build_username_section(items, length_value: int):
+def pick_with_preference(preferred_pool, full_pool, predicate, used, last_price):
+    preferred_matches = [
+        x for x in preferred_pool
+        if x["name"].lower() not in used and predicate(x)
+    ]
+    if preferred_matches:
+        return sort_items(preferred_matches)[0]
+
+    full_matches = [
+        x for x in full_pool
+        if x["name"].lower() not in used and predicate(x)
+    ]
+    if full_matches:
+        return sort_items(full_matches)[0]
+
+    preferred_remaining = [
+        x for x in preferred_pool
+        if x["name"].lower() not in used
+    ]
+    if preferred_remaining:
+        return pick_closest_by_price(preferred_remaining, last_price)
+
+    full_remaining = [
+        x for x in full_pool
+        if x["name"].lower() not in used
+    ]
+    if full_remaining:
+        return pick_closest_by_price(full_remaining, last_price)
+
+    return None
+
+
+def build_username_section(all_items, preferred_items, length_value: int):
     config = USERNAME_PATTERN_CONFIG[length_value]
     patterns = config["patterns"]
     extra_count = config["extra_count"]
 
-    pool = [
-        x for x in items
+    full_pool = sort_items([
+        x for x in all_items
         if x["length"] == length_value
         and not (x["is_on_sale"] is False and x["ton_price"] <= 0)
-    ]
-    pool = sort_items(pool)
+    ])
+
+    preferred_pool = sort_items([
+        x for x in preferred_items
+        if x["length"] == length_value
+        and not (x["is_on_sale"] is False and x["ton_price"] <= 0)
+    ])
 
     used = set()
     selected = []
     last_price = None
 
     for pattern in patterns:
-        matches = [
-            x for x in pool
-            if x["name"].lower() not in used
-            and match_pattern(username_clean(x["name"]), pattern)
-        ]
-
-        if matches:
-            chosen = matches[0]
-        else:
-            remaining = [x for x in pool if x["name"].lower() not in used]
-            chosen = pick_closest_by_price(remaining, last_price)
-
+        chosen = pick_with_preference(
+            preferred_pool,
+            full_pool,
+            lambda x, p=pattern: match_pattern(username_clean(x["name"]), p),
+            used,
+            last_price,
+        )
         if not chosen:
             break
 
@@ -691,11 +777,26 @@ def build_username_section(items, length_value: int):
             last_price = chosen["ton_price"]
 
     if extra_count > 0:
-        remaining = [x for x in pool if x["name"].lower() not in used]
-        remaining = sort_items(remaining)[:extra_count]
-        for x in remaining:
+        preferred_remaining = [
+            x for x in preferred_pool
+            if x["name"].lower() not in used
+        ]
+        for x in sort_items(preferred_remaining):
+            if len([i for i in selected]) >= len(patterns) + extra_count:
+                break
             used.add(x["name"].lower())
             selected.append(x)
+
+        if len(selected) < len(patterns) + extra_count:
+            full_remaining = [
+                x for x in full_pool
+                if x["name"].lower() not in used
+            ]
+            for x in sort_items(full_remaining):
+                if len(selected) >= len(patterns) + extra_count:
+                    break
+                used.add(x["name"].lower())
+                selected.append(x)
 
     return selected
 
@@ -921,25 +1022,48 @@ async def upsert_message(chat_id: str, message_id, text: str, label: str, parse_
     print(f"IMPORTANT: Update {label} secret to:", new_message_id)
 
 
+async def fetch_usernames_with_fallback(length_value: int, url_api_params: dict):
+    preferred_items = []
+    if url_api_params:
+        preferred_items = await fetch_collection_items(
+            USERNAMES_COLLECTION_ADDRESS,
+            mode="usernames",
+            extra_params=url_api_params,
+            fail_soft=True,
+        )
+        preferred_items = [x for x in preferred_items if x["length"] == length_value]
+        print(f"DEBUG PREFERRED length={length_value} count={len(preferred_items)} params={url_api_params}")
+
+    all_items = await fetch_collection_items(
+        USERNAMES_COLLECTION_ADDRESS,
+        mode="usernames",
+        extra_params={},
+        fail_soft=False,
+    )
+    all_items = [x for x in all_items if x["length"] == length_value]
+    print(f"DEBUG FULL length={length_value} count={len(all_items)}")
+
+    return preferred_items, all_items
+
+
 async def main():
     ton_usd_rate = await fetch_ton_usd_rate()
 
-    username_items = await fetch_collection_items(
-        USERNAMES_COLLECTION_ADDRESS,
-        mode="usernames",
-    )
+    pref_5, all_5 = await fetch_usernames_with_fallback(5, USERNAMES_5_API_PARAMS)
+    pref_6, all_6 = await fetch_usernames_with_fallback(6, USERNAMES_6_API_PARAMS)
+    pref_7, all_7 = await fetch_usernames_with_fallback(7, USERNAMES_7_API_PARAMS)
 
-    print(f"DEBUG USERNAME TOTAL UNIQUE: {len(username_items)}")
-
-    section_5 = build_username_section(username_items, 5)
-    section_6 = build_username_section(username_items, 6)
-    section_7 = build_username_section(username_items, 7)
+    section_5 = build_username_section(all_5, pref_5, 5)
+    section_6 = build_username_section(all_6, pref_6, 6)
+    section_7 = build_username_section(all_7, pref_7, 7)
 
     number_floor = {}
     if NUMBERS_COLLECTION_ADDRESS:
         number_items = await fetch_collection_items(
             NUMBERS_COLLECTION_ADDRESS,
             mode="numbers",
+            extra_params={},
+            fail_soft=False,
         )
         number_floor = build_number_floor(number_items)
 

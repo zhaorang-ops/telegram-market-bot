@@ -91,8 +91,8 @@ USERNAME_ADD_USD = {
 }
 
 NUMBER_ADD_USD = {
-    "has4": 100.0,
-    "no4": 100.0,
+    "has4": 50.0,
+    "no4": 50.0,
 }
 
 USERNAME_RE = re.compile(r"^@?[A-Za-z0-9_]{4,32}$")
@@ -705,39 +705,29 @@ def html_escape(text: str) -> str:
 def build_usernames_message(section_5, section_6, ton_usd_rate):
     now_str = datetime.now(TZ).strftime("%Y-%m-%d %H:%M:%S")
 
-    left_title = "【5位用户名】"
-    right_title = "【6位用户名】"
-
-    rows = max(len(section_5), len(section_6))
-    left_width = 26
-    right_width = 26
-
     lines = []
-    lines.append("多用户名价格实时更新：")
-    lines.append("")
-    lines.append(f"{left_title:<{left_width}}{right_title:<{right_width}}")
-    lines.append(f"{'-' * 12:<{left_width}}{'-' * 12:<{right_width}}")
-
-    for i in range(rows):
-        left_text = ""
-        right_text = ""
-
-        if i < len(section_5):
-            item = section_5[i]
+    lines.append("【5位用户名】")
+    if not section_5:
+        lines.append("暂无数据")
+    else:
+        for item in section_5:
             usd_val = usd_after_add(item["ton_price"], ton_usd_rate, USERNAME_ADD_USD[5])
-            left_text = f"{item['name']} ${usd_val:.2f}"
+            lines.append(f"{item['name']}  ${usd_val:.2f}")
 
-        if i < len(section_6):
-            item = section_6[i]
+    lines.append("")
+    lines.append("【6位用户名】")
+    if not section_6:
+        lines.append("暂无数据")
+    else:
+        for item in section_6:
             usd_val = usd_after_add(item["ton_price"], ton_usd_rate, USERNAME_ADD_USD[6])
-            right_text = f"{item['name']} ${usd_val:.2f}"
-
-        lines.append(f"{left_text:<{left_width}}{right_text:<{right_width}}")
+            lines.append(f"{item['name']}  ${usd_val:.2f}")
 
     lines.append("")
     lines.append(f"更多用户名咨询客服，更新时间：{now_str}")
 
-    return "<pre>" + html_escape("\n".join(lines)) + "</pre>"
+    body = html_escape("\n".join(lines))
+    return f"多用户名价格实时更新（点开展开）\n<blockquote expandable>{body}</blockquote>"
 
 
 def build_numbers_message(number_floor, ton_usd_rate):
@@ -758,6 +748,11 @@ def build_numbers_message(number_floor, ton_usd_rate):
     else:
         lines.append("【无4正常】 暂无数据")
 
+    lines.append("")
+    lines.append("📱 自有500+号码库存")
+    lines.append("🔐 Telegram官方匿名号码完全隐私")
+    lines.append("⏰ 24小时自助接码即租即用")
+    lines.append("🤖 自助下单：@zuhao8bot")
     lines.append("")
     lines.append(f"更新时间：{now_str}")
     return "\n".join(lines)

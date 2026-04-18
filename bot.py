@@ -759,7 +759,7 @@ def build_usernames_message(section_5, section_6, ton_usd_rate):
         lines.append("🤖 自助下单：@zuhao8bot")
         lines.append("")
         lines.append(f"更新时间：{now_str}")
-        return \"\\n\".join(lines)
+        return "\n".join(lines)
 
 
 def build_promo_message_html():

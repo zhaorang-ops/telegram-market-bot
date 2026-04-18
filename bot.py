@@ -54,12 +54,6 @@ def parse_marketapp_url(url: str):
     }
 
 
-def parse_prefixes(value: str):
-    if not value:
-        return []
-    return [x.strip().lower() for x in value.split(",") if x.strip()]
-
-
 BOT_TOKEN = os.environ["BOT_TOKEN"].strip()
 MARKETAPP_API_TOKEN = os.environ["MARKETAPP_API_TOKEN"].strip()
 
@@ -91,12 +85,10 @@ NUMBERS_COLLECTION_ADDRESS = normalize_collection_address(
 TZ = ZoneInfo(os.environ.get("TZ", "Asia/Shanghai"))
 MAX_PAGES = int(os.environ.get("MAX_PAGES", "200"))
 
-USERNAMES_5_PREFIXES = parse_prefixes(os.environ.get("USERNAMES_5_PREFIXES", ""))
-USERNAMES_6_PREFIXES = parse_prefixes(os.environ.get("USERNAMES_6_PREFIXES", ""))
-
 USERNAME_ADD_USD = {
     5: 50.0,
     6: 50.0,
+    7: 50.0,
 }
 
 NUMBER_ADD_USD = {
@@ -122,6 +114,68 @@ PROMO_MESSAGE_HTML = """
 
 官方多用户名可和礼物增加账号权重不易被封<tg-emoji emoji-id="5220166546491459639">🔥</tg-emoji>招牌11年防注销老号，注册超过11年的飞机号，超级无敌螺旋盖亚聚变核能耐操。
 """.strip()
+
+
+USERNAME_PATTERN_CONFIG = {
+    5: {
+        "patterns": [
+            "aaaa*",
+            "aaa*a",
+            "aa*aa",
+            "a*aaa",
+            "*aaaa",
+            "aaa**",
+            "aa**a",
+            "a**aa",
+            "aaa",
+            "aa***",
+            "a***a",
+            "***aa",
+            "a****",
+            "****a",
+        ],
+        "extra_count": 6,
+    },
+    6: {
+        "patterns": [
+            "aaaaa*",
+            "aaaa*a",
+            "aaa*aa",
+            "aa*aaa",
+            "a*aaaa",
+            "*aaaaa",
+            "aaaa",
+            "aaa**a",
+            "aa**aa",
+            "a**aaa",
+            "aaaa",
+            "aaa***",
+            "aa***a",
+            "a***aa",
+            "***aaa",
+            "aa****",
+            "a****a",
+            "****aa",
+        ],
+        "extra_count": 2,
+    },
+    7: {
+        "patterns": [
+            "aaaaaa*",
+            "aaaaa*a",
+            "aaaa*aa",
+            "aaa*aaa",
+            "aa*aaaa",
+            "a*aaaaa",
+            "aaaaa",
+            "aaaa**a",
+            "aaa**aa",
+            "aa**aaa",
+            "a**aaaa",
+        ],
+        "extra_count": 0,
+    },
+}
 
 
 def build_promo_reply_markup():
@@ -405,7 +459,7 @@ def parse_item(raw: dict, mode: str):
         attr_len = extract_attr_length(raw)
         clean = name.lstrip("@")
         length_value = attr_len if attr_len is not None else len(clean)
-        if length_value not in {5, 6}:
+        if length_value not in {5, 6, 7}:
             return None
     else:
         length_value = None
@@ -542,11 +596,8 @@ def username_clean(name: str) -> str:
     return name.lstrip("@").lower()
 
 
-def match_prefix(name: str, prefixes):
-    if not prefixes:
-        return True
-    clean = username_clean(name)
-    return any(clean.startswith(p) for p in prefixes)
+def price_or_inf(item):
+    return item["ton_price"] if item["ton_price"] > 0 else 10**18
 
 
 def sort_items(items):
@@ -554,122 +605,99 @@ def sort_items(items):
         items,
         key=lambda x: (
             x["ton_price"] <= 0,
-            x["ton_price"] if x["ton_price"] > 0 else 10**18,
+            price_or_inf(x),
             x["name"].lower(),
         )
     )
 
 
-def match_5_patterns(s: str):
-    return {
-        "aa***": len(s) == 5 and s[0] == s[1],
-        "aaa**": len(s) == 5 and s[0] == s[1] == s[2],
-        "aaaa*": len(s) == 5 and s[0] == s[1] == s[2] == s[3],
-        "*aaaa": len(s) == 5 and s[1] == s[2] == s[3] == s[4],
-        "**aaa": len(s) == 5 and s[2] == s[3] == s[4],
-        "***aa": len(s) == 5 and s[3] == s[4],
-    }
+def match_pattern(clean: str, pattern: str) -> bool:
+    if len(pattern) == len(clean):
+        groups = {}
+        for i, ch in enumerate(pattern):
+            if ch == "*":
+                continue
+            groups.setdefault(ch, []).append(i)
+
+        for positions in groups.values():
+            first_char = clean[positions[0]]
+            for pos in positions[1:]:
+                if clean[pos] != first_char:
+                    return False
+        return True
+
+    if pattern and set(pattern) == {"a"} and len(pattern) <= len(clean):
+        run_len = len(pattern)
+        for i in range(len(clean) - run_len + 1):
+            chunk = clean[i:i + run_len]
+            if len(set(chunk)) == 1:
+                return True
+        return False
+
+    return False
 
 
-def match_6_patterns(s: str):
-    return {
-        "aa****": len(s) == 6 and s[0] == s[1],
-        "aaa***": len(s) == 6 and s[0] == s[1] == s[2],
-        "aaaa**": len(s) == 6 and s[0] == s[1] == s[2] == s[3],
-        "**aaaa": len(s) == 6 and s[2] == s[3] == s[4] == s[5],
-        "***aaa": len(s) == 6 and s[3] == s[4] == s[5],
-        "****aa": len(s) == 6 and s[4] == s[5],
-    }
+def pick_closest_by_price(candidates, target_price):
+    if not candidates:
+        return None
+    if target_price is None or target_price <= 0:
+        return sort_items(candidates)[0]
+
+    return min(
+        candidates,
+        key=lambda x: (
+            abs(price_or_inf(x) - target_price),
+            price_or_inf(x),
+            x["name"].lower(),
+        ),
+    )
 
 
-def pattern_matchers(length_value: int):
-    if length_value == 5:
-        return [
-            ("aa***", lambda s: match_5_patterns(s)["aa***"]),
-            ("aaa**", lambda s: match_5_patterns(s)["aaa**"]),
-            ("aaaa*", lambda s: match_5_patterns(s)["aaaa*"]),
-            ("*aaaa", lambda s: match_5_patterns(s)["*aaaa"]),
-            ("**aaa", lambda s: match_5_patterns(s)["**aaa"]),
-            ("***aa", lambda s: match_5_patterns(s)["***aa"]),
-        ]
-    if length_value == 6:
-        return [
-            ("aa****", lambda s: match_6_patterns(s)["aa****"]),
-            ("aaa***", lambda s: match_6_patterns(s)["aaa***"]),
-            ("aaaa**", lambda s: match_6_patterns(s)["aaaa**"]),
-            ("**aaaa", lambda s: match_6_patterns(s)["**aaaa"]),
-            ("***aaa", lambda s: match_6_patterns(s)["***aaa"]),
-            ("****aa", lambda s: match_6_patterns(s)["****aa"]),
-        ]
-    return []
+def build_username_section(items, length_value: int):
+    config = USERNAME_PATTERN_CONFIG[length_value]
+    patterns = config["patterns"]
+    extra_count = config["extra_count"]
 
-
-def build_username_section(items, length_value: int, prefixes=None):
     pool = [
         x for x in items
         if x["length"] == length_value
         and not (x["is_on_sale"] is False and x["ton_price"] <= 0)
-        and match_prefix(x["name"], prefixes or [])
     ]
-
     pool = sort_items(pool)
-    matchers = pattern_matchers(length_value)
-
-    def is_special(item):
-        s = username_clean(item["name"])
-        return any(fn(s) for _, fn in matchers)
 
     used = set()
+    selected = []
+    last_price = None
 
-    normal_candidates = [x for x in pool if not is_special(x)]
-    first_14 = []
+    for pattern in patterns:
+        matches = [
+            x for x in pool
+            if x["name"].lower() not in used
+            and match_pattern(username_clean(x["name"]), pattern)
+        ]
 
-    for x in normal_candidates:
-        k = x["name"].lower()
-        if k in used:
-            continue
-        used.add(k)
-        first_14.append(x)
-        if len(first_14) == 14:
+        if matches:
+            chosen = matches[0]
+        else:
+            remaining = [x for x in pool if x["name"].lower() not in used]
+            chosen = pick_closest_by_price(remaining, last_price)
+
+        if not chosen:
             break
 
-    if len(first_14) < 14:
-        for x in pool:
-            k = x["name"].lower()
-            if k in used:
-                continue
-            used.add(k)
-            first_14.append(x)
-            if len(first_14) == 14:
-                break
+        used.add(chosen["name"].lower())
+        selected.append(chosen)
+        if chosen["ton_price"] > 0:
+            last_price = chosen["ton_price"]
 
-    last_6 = []
-    for _, fn in matchers:
-        chosen = None
-        for x in pool:
-            k = x["name"].lower()
-            if k in used:
-                continue
-            if fn(username_clean(x["name"])):
-                chosen = x
-                break
+    if extra_count > 0:
+        remaining = [x for x in pool if x["name"].lower() not in used]
+        remaining = sort_items(remaining)[:extra_count]
+        for x in remaining:
+            used.add(x["name"].lower())
+            selected.append(x)
 
-        if chosen:
-            used.add(chosen["name"].lower())
-            last_6.append(chosen)
-        else:
-            filler = None
-            for x in pool:
-                k = x["name"].lower()
-                if k in used:
-                    continue
-                filler = x
-                break
-            if filler:
-                used.add(filler["name"].lower())
-                last_6.append(filler)
-
-    return first_14 + last_6
+    return selected
 
 
 def number_digits(name: str) -> str:
@@ -728,43 +756,42 @@ def html_escape(text: str) -> str:
     )
 
 
-def build_usernames_message(section_5, section_6, ton_usd_rate):
+def build_usernames_message(section_5, section_6, section_7, ton_usd_rate):
     now_str = datetime.now(TZ).strftime("%Y-%m-%d %H:%M:%S")
 
-    left_title = "【5位用户名】"
-    right_title = "【6位用户名】"
-    left_width = 26
-    right_width = 26
-    rows = max(len(section_5), len(section_6))
-
     lines = []
-    lines.append(f"{left_title:<{left_width}}{right_title:<{right_width}}")
-    lines.append(f"{'-' * 12:<{left_width}}{'-' * 12:<{right_width}}")
 
-    for i in range(rows):
-        left_text = ""
-        right_text = ""
-
-        if i < len(section_5):
-            item = section_5[i]
+    lines.append("【5位用户名】")
+    if not section_5:
+        lines.append("暂无数据")
+    else:
+        for item in section_5:
             usd_val = usd_after_add(item["ton_price"], ton_usd_rate, USERNAME_ADD_USD[5])
-            left_text = f"{item['name']} ${usd_val:.2f}"
+            lines.append(f"{item['name']}  ${usd_val:.2f}")
 
-        if i < len(section_6):
-            item = section_6[i]
+    lines.append("")
+    lines.append("【6位用户名】")
+    if not section_6:
+        lines.append("暂无数据")
+    else:
+        for item in section_6:
             usd_val = usd_after_add(item["ton_price"], ton_usd_rate, USERNAME_ADD_USD[6])
-            right_text = f"{item['name']} ${usd_val:.2f}"
+            lines.append(f"{item['name']}  ${usd_val:.2f}")
 
-        lines.append(f"{left_text:<{left_width}}{right_text:<{right_width}}")
+    lines.append("")
+    lines.append("【7位用户名】")
+    if not section_7:
+        lines.append("暂无数据")
+    else:
+        for item in section_7:
+            usd_val = usd_after_add(item["ton_price"], ton_usd_rate, USERNAME_ADD_USD[7])
+            lines.append(f"{item['name']}  ${usd_val:.2f}")
 
     lines.append("")
     lines.append(f"更多用户名咨询客服，更新时间：{now_str}")
 
     body = html_escape("\n".join(lines))
-    return (
-        "多用户名价格实时更新（点开展开）\n"
-        f"<blockquote expandable><pre>{body}</pre></blockquote>"
-    )
+    return f"多用户名价格实时更新（点开展开）\n<blockquote expandable>{body}</blockquote>"
 
 
 def build_numbers_message(number_floor, ton_usd_rate):
@@ -903,19 +930,10 @@ async def main():
     )
 
     print(f"DEBUG USERNAME TOTAL UNIQUE: {len(username_items)}")
-    print(f"DEBUG PREFIX 5: {USERNAMES_5_PREFIXES}")
-    print(f"DEBUG PREFIX 6: {USERNAMES_6_PREFIXES}")
 
-    section_5 = build_username_section(
-        username_items,
-        5,
-        prefixes=USERNAMES_5_PREFIXES,
-    )
-    section_6 = build_username_section(
-        username_items,
-        6,
-        prefixes=USERNAMES_6_PREFIXES,
-    )
+    section_5 = build_username_section(username_items, 5)
+    section_6 = build_username_section(username_items, 6)
+    section_7 = build_username_section(username_items, 7)
 
     number_floor = {}
     if NUMBERS_COLLECTION_ADDRESS:
@@ -925,7 +943,7 @@ async def main():
         )
         number_floor = build_number_floor(number_items)
 
-    usernames_text = build_usernames_message(section_5, section_6, ton_usd_rate)
+    usernames_text = build_usernames_message(section_5, section_6, section_7, ton_usd_rate)
     numbers_text = build_numbers_message(number_floor, ton_usd_rate) if NUMBERS_COLLECTION_ADDRESS else None
     promo_text = build_promo_message_html()
     promo_reply_markup = build_promo_reply_markup()

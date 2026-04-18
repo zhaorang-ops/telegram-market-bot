@@ -42,6 +42,6 @@ jobs:
           NUMBERS_COLLECTION_ADDRESS: "https://marketapp.ws/collection/EQAOQdwdw8kGftJCSFgOErM1mBjYPe4DBPq8-AhF6vr9si5N/"
 
           TZ: "Asia/Shanghai"
-          MAX_PAGES: "100"
+          MAX_PAGES: "500"
 
         run: python bot.py

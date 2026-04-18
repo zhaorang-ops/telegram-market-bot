@@ -25,7 +25,7 @@ jobs:
       USERNAMES_6_URL: "https://marketapp.ws/collection/EQCA14o1-VWhS2efqoh_9M1b_A9DtKTuoqfmkn83AbJzwnPi/?tab=nfts&view=list&filter_by=sale&sort_by=price_asc&market_filter_by=any&attrs=Length%7E6&query="
       USERNAMES_7_URL: "https://marketapp.ws/collection/EQCA14o1-VWhS2efqoh_9M1b_A9DtKTuoqfmkn83AbJzwnPi/?tab=nfts&view=list&filter_by=sale&sort_by=price_asc&market_filter_by=any&attrs=Length%7E7&query="
 
-      NUMBERS_URL: "把你的888匿名号网页链接填这里"
+      NUMBERS_URL: "https://marketapp.ws/collection/EQAOQdwdw8kGftJCSFgOErM1mBjYPe4DBPq8-AhF6vr9si5N/"
 
       TZ: "Asia/Shanghai"
       TON_USD_OVERRIDE: ""

@@ -1,4 +1,5 @@
 import asyncio
+import json
 import os
 import re
 from datetime import datetime
@@ -28,8 +29,6 @@ NUMBERS_URL = os.environ.get("NUMBERS_URL", "").strip()
 
 TZ = ZoneInfo(os.environ.get("TZ", "Asia/Shanghai"))
 
-# 为了提速，这里先用较少补位
-# 想补更多，把这里改大
 USERNAME_EXTRA_COUNT = {
     5: 2,
     6: 2,
@@ -219,6 +218,131 @@ def to_float(value, default=0.0):
         return default
 
 
+def deep_walk(obj):
+    if isinstance(obj, dict):
+        for k, v in obj.items():
+            yield k, v
+            yield from deep_walk(v)
+    elif isinstance(obj, list):
+        for item in obj:
+            yield from deep_walk(item)
+
+
+def looks_like_username(value: str, expected_length: int) -> bool:
+    if not isinstance(value, str):
+        return False
+    value = value.strip()
+    if not re.fullmatch(r"@?[A-Za-z0-9_]{4,32}", value):
+        return False
+    return len(value.lstrip("@")) == expected_length
+
+
+def normalize_username(value: str) -> str:
+    value = value.strip()
+    if not value.startswith("@"):
+        value = "@" + value
+    return value
+
+
+def extract_price_from_dict(raw: dict) -> float:
+    direct_candidates = [
+        raw.get("min_bid"),
+        raw.get("max_bid"),
+        raw.get("full_price"),
+        raw.get("price"),
+        raw.get("price_ton"),
+        raw.get("ton_price"),
+        raw.get("floor_price"),
+        raw.get("amount"),
+    ]
+
+    for v in direct_candidates:
+        num = to_float(v, 0.0)
+        if num > 0:
+            if num > 1_000_000:
+                num = num / 1_000_000_000
+            return num
+
+    scored = []
+    for key, value in deep_walk(raw):
+        key_l = str(key).lower()
+        if not any(x in key_l for x in ["price", "bid", "ton", "amount"]):
+            continue
+        if "usd" in key_l:
+            continue
+        num = to_float(value, 0.0)
+        if num <= 0:
+            continue
+        if num > 1_000_000:
+            num = num / 1_000_000_000
+        score = 0
+        if key_l == "min_bid":
+            score += 100
+        if key_l == "price":
+            score += 90
+        if "ton" in key_l:
+            score += 80
+        scored.append((score, num))
+
+    if not scored:
+        return 0.0
+
+    scored.sort(key=lambda x: (-x[0], x[1]))
+    return scored[0][1]
+
+
+def parse_candidates_from_json_payload(payload, expected_length: int):
+    candidates = {}
+
+    def add_candidate(name: str, price: float, raw):
+        if not name or price <= 0:
+            return
+        key = name.lower()
+        old = candidates.get(key)
+        if old is None or price < old["ton_price"]:
+            candidates[key] = {
+                "name": name,
+                "length": expected_length,
+                "ton_price": price,
+                "is_on_sale": True,
+                "is_restricted": False,
+                "raw": raw,
+            }
+
+    if isinstance(payload, list):
+        payload_items = payload
+    else:
+        payload_items = [payload]
+
+    for root in payload_items:
+        if isinstance(root, dict):
+            maybe_objects = [root]
+            for _, v in deep_walk(root):
+                if isinstance(v, dict):
+                    maybe_objects.append(v)
+
+            for obj in maybe_objects:
+                names = []
+                for k, v in obj.items():
+                    if isinstance(v, str):
+                        if looks_like_username(v, expected_length):
+                            names.append(normalize_username(v))
+
+                if not names:
+                    for _, v in deep_walk(obj):
+                        if isinstance(v, str) and looks_like_username(v, expected_length):
+                            names.append(normalize_username(v))
+
+                if not names:
+                    continue
+
+                price = extract_price_from_dict(obj)
+                for name in names:
+                    add_candidate(name, price, obj)
+
+    return sort_items(list(candidates.values()))
+
+
 async def fetch_ton_usd_rate():
     override = os.environ.get("TON_USD_OVERRIDE", "").strip()
     if override:
@@ -241,17 +365,6 @@ async def fetch_ton_usd_rate():
             return float(data["the-open-network"]["usd"])
     except Exception:
         return 0.0
-
-
-def add_or_replace_query(base_url: str, query_value: str) -> str:
-    if not base_url:
-        return ""
-
-    if "query=" in base_url:
-        return re.sub(r"query=[^&]*", f"query={quote(query_value)}", base_url)
-
-    sep = "&" if "?" in base_url else "?"
-    return f"{base_url}{sep}query={quote(query_value)}"
 
 
 async def get_search_box(page):
@@ -329,6 +442,22 @@ async def fetch_query_result(page, query_value: str, expected_length: int):
     if search_box is None:
         return None
 
+    response_bodies = []
+
+    async def on_response(response):
+        try:
+            ctype = (response.headers.get("content-type") or "").lower()
+            if "application/json" not in ctype:
+                return
+            body = await response.text()
+            if not body:
+                return
+            response_bodies.append(body)
+        except Exception:
+            return
+
+    page.on("response", on_response)
+
     try:
         await search_box.click()
         await search_box.fill("")
@@ -337,6 +466,19 @@ async def fetch_query_result(page, query_value: str, expected_length: int):
 
         await page.wait_for_timeout(RESULT_WAIT_MS)
 
+        # 先从前端接口响应里找
+        json_candidates = []
+        for raw_body in response_bodies[-12:]:
+            try:
+                payload = json.loads(raw_body)
+            except Exception:
+                continue
+            json_candidates.extend(parse_candidates_from_json_payload(payload, expected_length))
+
+        if json_candidates:
+            return json_candidates[0]
+
+        # 前端响应取不到，再回退到 DOM
         ready = await wait_rows_ready(page)
         if not ready:
             return None
@@ -344,6 +486,11 @@ async def fetch_query_result(page, query_value: str, expected_length: int):
         return await extract_first_row_from_page(page, expected_length)
     except Exception:
         return None
+    finally:
+        try:
+            page.remove_listener("response", on_response)
+        except Exception:
+            pass
 
 
 async def fetch_best_match_by_query(page, length_value: int, rule_name: str, run_len, kind: str):
@@ -364,7 +511,7 @@ async def fetch_best_match_by_query(page, length_value: int, rule_name: str, run
     for q in queries:
         result = await fetch_query_result(page, q, length_value)
         if result and rule_match(username_clean(result["name"]), rule_name, run_len, kind):
-            print(f"DEBUG INPUT HIT length={length_value} rule={rule_name} query={q} name={result['name']}")
+            print(f"DEBUG API HIT length={length_value} rule={rule_name} query={q} name={result['name']}")
             QUERY_RESULT_CACHE[cache_key] = result
             return result
 

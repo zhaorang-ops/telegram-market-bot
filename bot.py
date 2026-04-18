@@ -734,32 +734,32 @@ def build_usernames_message(section_5, section_6, ton_usd_rate):
     return "<pre>" + html_escape("\n".join(lines)) + "</pre>"
 
 
-def build_numbers_message(number_floor, ton_usd_rate):
-    now_str = datetime.now(TZ).strftime("%Y-%m-%d %H:%M:%S")
-    lines = ["📱【官方888号】地板价"]
+    def build_numbers_message(number_floor, ton_usd_rate):
+        now_str = datetime.now(TZ).strftime("%Y-%m-%d %H:%M:%S")
+        lines = ["📱【官方888号】地板价"]
 
-    item = number_floor.get("has4")
-    if item:
-        usd_val = usd_after_add(item["ton_price"], ton_usd_rate, NUMBER_ADD_USD["has4"])
-        lines.append(f"【含4正常】 {item['name']} - ${usd_val:.2f}")
-    else:
-        lines.append("【含4正常】 暂无数据")
+        item = number_floor.get("has4")
+        if item:
+            usd_val = usd_after_add(item["ton_price"], ton_usd_rate, NUMBER_ADD_USD["has4"])
+            lines.append(f"【含4正常】 {item['name']} - ${usd_val:.2f}")
+        else:
+            lines.append("【含4正常】 暂无数据")
 
-    item = number_floor.get("no4")
-    if item:
-        usd_val = usd_after_add(item["ton_price"], ton_usd_rate, NUMBER_ADD_USD["no4"])
-        lines.append(f"【无4正常】 {item['name']} - ${usd_val:.2f}")
-    else:
-        lines.append("【无4正常】 暂无数据")
+        item = number_floor.get("no4")
+        if item:
+            usd_val = usd_after_add(item["ton_price"], ton_usd_rate, NUMBER_ADD_USD["no4"])
+            lines.append(f"【无4正常】 {item['name']} - ${usd_val:.2f}")
+        else:
+            lines.append("【无4正常】 暂无数据")
 
-    lines.append("")
-    lines.append("📱 自有500+号码库存")
-    lines.append("🔐 Telegram官方匿名号码完全隐私")
-    lines.append("⏰ 24小时自助接码即租即用")
-    lines.append("🤖 自助下单：@zuhao8bot")
-    lines.append("")
-    lines.append(f"更新时间：{now_str}")
-    return \"\\n\".join(lines)
+        lines.append("")
+        lines.append("📱 自有500+号码库存")
+        lines.append("🔐 Telegram官方匿名号码完全隐私")
+        lines.append("⏰ 24小时自助接码即租即用")
+        lines.append("🤖 自助下单：@zuhao8bot")
+        lines.append("")
+        lines.append(f"更新时间：{now_str}")
+        return \"\\n\".join(lines)
 
 
 def build_promo_message_html():

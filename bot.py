@@ -2,91 +2,31 @@ import asyncio
 import os
 import re
 from datetime import datetime
-from urllib.parse import urlparse, parse_qs
+from urllib.parse import quote
 from zoneinfo import ZoneInfo
 
 import httpx
-
-
-def normalize_collection_address(value: str) -> str:
-    value = (value or "").strip()
-    if not value:
-        return ""
-
-    if "/collection/" in value:
-        value = value.split("/collection/", 1)[1]
-        value = value.split("?", 1)[0]
-        value = value.split("/", 1)[0]
-
-    return value.strip()
-
-
-def parse_message_id(value: str):
-    value = (value or "").strip()
-    if value.isdigit() and int(value) > 0:
-        return int(value)
-    return None
-
-
-def parse_marketapp_url(url: str):
-    url = (url or "").strip()
-    if not url:
-        return {"collection_address": "", "length": None}
-
-    collection_address = normalize_collection_address(url)
-
-    length_value = None
-    try:
-        parsed = urlparse(url)
-        qs = parse_qs(parsed.query)
-        attrs = qs.get("attrs", [])
-        for attr in attrs:
-            m = re.search(r"Length~(\d+)", attr)
-            if m:
-                length_value = int(m.group(1))
-                break
-    except Exception:
-        pass
-
-    return {
-        "collection_address": collection_address,
-        "length": length_value,
-    }
+from playwright.async_api import async_playwright, TimeoutError as PlaywrightTimeoutError
 
 
 BOT_TOKEN = os.environ["BOT_TOKEN"].strip()
-MARKETAPP_API_TOKEN = os.environ["MARKETAPP_API_TOKEN"].strip()
 
 USERNAMES_CHAT_ID = os.environ["USERNAMES_CHAT_ID"].strip()
-USERNAMES_MESSAGE_ID = parse_message_id(os.environ.get("USERNAMES_MESSAGE_ID", "0"))
+USERNAMES_MESSAGE_ID = int(os.environ.get("USERNAMES_MESSAGE_ID", "0") or "0")
 
 NUMBERS_CHAT_ID = os.environ["NUMBERS_CHAT_ID"].strip()
-NUMBERS_MESSAGE_ID = parse_message_id(os.environ.get("NUMBERS_MESSAGE_ID", "0"))
+NUMBERS_MESSAGE_ID = int(os.environ.get("NUMBERS_MESSAGE_ID", "0") or "0")
 
 PROMO_CHAT_ID = (os.environ.get("PROMO_CHAT_ID", "").strip() or NUMBERS_CHAT_ID)
-PROMO_MESSAGE_ID = parse_message_id(os.environ.get("PROMO_MESSAGE_ID", "0"))
+PROMO_MESSAGE_ID = int(os.environ.get("PROMO_MESSAGE_ID", "0") or "0")
 
 USERNAMES_5_URL = os.environ.get("USERNAMES_5_URL", "").strip()
 USERNAMES_6_URL = os.environ.get("USERNAMES_6_URL", "").strip()
 USERNAMES_7_URL = os.environ.get("USERNAMES_7_URL", "").strip()
 
-USERNAMES_5_INFO = parse_marketapp_url(USERNAMES_5_URL)
-USERNAMES_6_INFO = parse_marketapp_url(USERNAMES_6_URL)
-USERNAMES_7_INFO = parse_marketapp_url(USERNAMES_7_URL)
-
-USERNAMES_COLLECTION_ADDRESS = (
-    USERNAMES_5_INFO["collection_address"]
-    or USERNAMES_6_INFO["collection_address"]
-    or USERNAMES_7_INFO["collection_address"]
-    or "EQCA14o1-VWhS2efqoh_9M1b_A9DtKTuoqfmkn83AbJzwnPi"
-)
-
-NUMBERS_COLLECTION_ADDRESS = normalize_collection_address(
-    os.environ.get("NUMBERS_COLLECTION_ADDRESS", "")
-)
+NUMBERS_URL = os.environ.get("NUMBERS_URL", "").strip()
 
 TZ = ZoneInfo(os.environ.get("TZ", "Asia/Shanghai"))
-MAX_PAGES = int(os.environ.get("MAX_PAGES", "50"))
 
 USERNAME_ADD_USD = {
     5: 50.0,
@@ -98,12 +38,6 @@ NUMBER_ADD_USD = {
     "has4": 50.0,
     "no4": 50.0,
 }
-
-USERNAME_RE = re.compile(r"^@?[A-Za-z0-9_]{4,32}$")
-NUMBER_RE = re.compile(r"^\+?\d[\d\s]{6,}$")
-
-USERNAME_QUERY_ALPHA_CHARS = "abcdefghijklmnopqrstuvwxyz"
-USERNAME_QUERY_DIGIT_CHARS = ["6", "8", "9", "0", "1", "2", "3", "4", "5", "7"]
 
 PROMO_BUTTON_TEXT = "联系客服"
 PROMO_BUTTON_URL = "https://t.me/daimei1"
@@ -163,7 +97,8 @@ USERNAME_EXTRA_COUNT = {
     7: 6,
 }
 
-QUERY_RESULT_CACHE = {}
+USERNAME_QUERY_ALPHA_CHARS = "abcdefghijklmnopqrstuvwxyz"
+USERNAME_QUERY_DIGIT_CHARS = ["6", "8", "9", "0", "1", "2", "3", "4", "5", "7"]
 
 
 def build_promo_reply_markup():
@@ -179,459 +114,17 @@ def build_promo_reply_markup():
     }
 
 
-def to_float(value, default=0.0):
-    if value is None:
-        return default
-
-    if isinstance(value, (int, float)):
-        return float(value)
-
-    s = str(value).strip()
-    s = s.replace(",", "")
-    s = s.replace("$", "")
-    s = s.replace("TON", "")
-    s = s.replace("ton", "")
-    s = s.replace("≈", "")
-    s = s.replace("~", "")
-
-    m = re.search(r"-?\d+(?:\.\d+)?", s)
-    if not m:
-        return default
-
-    try:
-        return float(m.group(0))
-    except Exception:
-        return default
-
-
-def walk(obj):
-    if isinstance(obj, dict):
-        for k, v in obj.items():
-            yield k, v
-            yield from walk(v)
-    elif isinstance(obj, list):
-        for item in obj:
-            yield from walk(item)
-
-
-def get_items_list(payload):
-    if isinstance(payload, list):
-        return payload
-
-    if not isinstance(payload, dict):
-        return []
-
-    for key in ["items", "results", "data", "nfts", "assets"]:
-        value = payload.get(key)
-        if isinstance(value, list):
-            return value
-
-    for outer in ["data", "result"]:
-        outer_val = payload.get(outer)
-        if isinstance(outer_val, dict):
-            for key in ["items", "results", "nfts", "assets"]:
-                value = outer_val.get(key)
-                if isinstance(value, list):
-                    return value
-
-    return []
-
-
-def normalize_username(name: str) -> str:
-    name = str(name).strip()
-    if not name.startswith("@"):
-        name = "@" + name
-    return name
-
-
-def normalize_number(name: str) -> str:
-    text = re.sub(r"\s+", "", str(name).strip())
-    text = re.sub(r"[^\d+]", "", text)
-
-    if text.startswith("+"):
-        digits = text[1:]
-    else:
-        digits = text
-
-    if digits.startswith("888"):
-        tail = digits[3:]
-        if len(tail) == 4:
-            return f"+888 {tail[0]} {tail[1:]}"
-        if len(tail) == 8:
-            return f"+888 {tail[:4]} {tail[4:]}"
-        return f"+{digits}"
-
-    return str(name).strip()
-
-
-def extract_attr_length(raw: dict):
-    attrs = raw.get("attributes")
-    if not isinstance(attrs, list):
-        return None
-
-    for attr in attrs:
-        if not isinstance(attr, dict):
-            continue
-
-        key = str(attr.get("trait_type") or attr.get("name") or attr.get("key") or "").strip().lower()
-        if key != "length":
-            continue
-
-        value = attr.get("value")
-        if value is None:
-            continue
-
-        m = re.search(r"\d+", str(value))
-        if m:
-            return int(m.group(0))
-
-    return None
-
-
-def extract_name(raw: dict, mode: str):
-    name = raw.get("name")
-    if isinstance(name, str) and name.strip():
-        name = name.strip()
-        if mode == "usernames" and USERNAME_RE.match(name):
-            return normalize_username(name)
-        if mode == "numbers" and NUMBER_RE.match(name):
-            return normalize_number(name)
-
-    candidates = []
-    for key, value in walk(raw):
-        if not isinstance(value, str):
-            continue
-
-        text = value.strip()
-        key_l = str(key).lower()
-
-        if mode == "usernames" and USERNAME_RE.match(text):
-            score = 0
-            if key_l == "name":
-                score += 50
-            if "username" in key_l:
-                score += 100
-            if "telegram" in key_l:
-                score += 30
-            candidates.append((score, normalize_username(text)))
-
-        if mode == "numbers" and NUMBER_RE.match(text):
-            score = 0
-            if key_l == "name":
-                score += 50
-            if "phone" in key_l or "number" in key_l:
-                score += 100
-            candidates.append((score, normalize_number(text)))
-
-    if not candidates:
-        return None
-
-    candidates.sort(key=lambda x: (-x[0], x[1]))
-    return candidates[0][1]
-
-
-def extract_currency(raw: dict):
-    if isinstance(raw.get("currency"), str) and raw.get("currency").strip():
-        return raw["currency"].strip().upper()
-
-    for key, value in walk(raw):
-        if str(key).lower() == "currency" and isinstance(value, str) and value.strip():
-            return value.strip().upper()
-
-    return "TON"
-
-
-def nanoton_to_ton(value: float, currency: str):
-    if currency.upper() == "TON" and value > 1_000_000:
-        return value / 1_000_000_000
-    return value
-
-
-def extract_ton_price(raw: dict):
-    currency = extract_currency(raw)
-
-    direct_candidates = [
-        raw.get("min_bid"),
-        raw.get("max_bid"),
-        raw.get("full_price"),
-        raw.get("price"),
-        raw.get("price_ton"),
-        raw.get("ton_price"),
-    ]
-
-    for v in direct_candidates:
-        num = to_float(v, default=0.0)
-        if num > 0:
-            return nanoton_to_ton(num, currency)
-
-    scored = []
-    for key, value in walk(raw):
-        key_l = str(key).lower()
-        if not any(k in key_l for k in ["min_bid", "max_bid", "price", "full_price", "ton"]):
-            continue
-
-        num = to_float(value, default=0.0)
-        if num <= 0:
-            continue
-
-        score = 0
-        if key_l == "min_bid":
-            score += 150
-        if key_l == "max_bid":
-            score += 140
-        if key_l == "full_price":
-            score += 120
-        if key_l == "price_ton":
-            score += 110
-        if key_l == "price":
-            score += 100
-        if "usd" in key_l:
-            score -= 200
-
-        scored.append((score, nanoton_to_ton(num, currency)))
-
-    if not scored:
-        return 0.0
-
-    scored.sort(key=lambda x: (-x[0], x[1]))
-    return scored[0][1]
-
-
-def extract_restricted(raw: dict):
-    value = raw.get("is_restricted")
-    if isinstance(value, bool):
-        return value
-    if value is not None:
-        return str(value).strip().lower() in {"true", "1", "yes", "restricted"}
-
-    for key, v in walk(raw):
-        key_l = str(key).lower()
-        if "restricted" in key_l:
-            if isinstance(v, bool):
-                return v
-            return str(v).strip().lower() in {"true", "1", "yes", "restricted"}
-
-        if key_l == "status" and isinstance(v, str):
-            if "restricted" in v.strip().lower():
-                return True
-
-    return False
-
-
-def extract_on_sale(raw: dict):
-    for key, v in walk(raw):
-        key_l = str(key).lower()
-
-        if key_l in {"is_on_sale", "on_sale"}:
-            return bool(v)
-
-        if key_l == "status" and isinstance(v, str):
-            status = v.strip().lower()
-            if status in {"onsale", "on_sale", "listed", "active"} or "sale" in status:
-                return True
-
-    listed_at = raw.get("listed_at")
-    price = extract_ton_price(raw)
-    if listed_at and price > 0:
-        return True
-
-    return None
-
-
-def parse_item(raw: dict, mode: str):
-    name = extract_name(raw, mode)
-    if not name:
-        return None
-
-    if mode == "usernames":
-        attr_len = extract_attr_length(raw)
-        clean = name.lstrip("@")
-        length_value = attr_len if attr_len is not None else len(clean)
-        if length_value not in {5, 6, 7}:
-            return None
-    else:
-        length_value = None
-
-    return {
-        "name": name,
-        "length": length_value,
-        "ton_price": extract_ton_price(raw),
-        "is_restricted": extract_restricted(raw),
-        "is_on_sale": extract_on_sale(raw),
-        "raw": raw,
-    }
-
-
-async def fetch_ton_usd_rate():
-    override = os.environ.get("TON_USD_OVERRIDE", "").strip()
-    if override:
-        try:
-            return float(override)
-        except Exception:
-            pass
-
-    url = "https://api.coingecko.com/api/v3/simple/price"
-    params = {
-        "ids": "the-open-network",
-        "vs_currencies": "usd",
-    }
-
-    try:
-        async with httpx.AsyncClient(timeout=20) as client:
-            resp = await client.get(url, params=params)
-            resp.raise_for_status()
-            data = resp.json()
-            return float(data["the-open-network"]["usd"])
-    except Exception:
-        return 0.0
-
-
-async def safe_get(client, url, headers, params, retries=2, fail_soft=False):
-    last_error = None
-
-    for attempt in range(1, retries + 1):
-        try:
-            resp = await client.get(url, headers=headers, params=params)
-            return resp
-        except (httpx.ConnectTimeout, httpx.ReadTimeout, httpx.ConnectError) as e:
-            last_error = e
-            print(f"DEBUG HTTP RETRY {attempt}/{retries} params={params} error={repr(e)}")
-            if attempt < retries:
-                await asyncio.sleep(attempt)
-
-    if fail_soft:
-        print(f"DEBUG HTTP FAIL_SOFT params={params} error={repr(last_error)}")
-        return None
-
-    raise last_error
-
-
-def merge_lowest_price_item(items_map, item):
-    key = item["name"].lower()
-    old = items_map.get(key)
-    if old is None:
-        items_map[key] = item
-        return
-
-    old_price = old["ton_price"] if old["ton_price"] > 0 else 10**18
-    new_price = item["ton_price"] if item["ton_price"] > 0 else 10**18
-    if new_price < old_price:
-        items_map[key] = item
-
-
-async def fetch_collection_items(collection_address: str, mode: str, extra_params=None, fail_soft=False, page_limit=None):
-    if not collection_address:
-        return []
-
-    api_url = f"https://api.marketapp.ws/v1/nfts/collections/{collection_address}/"
-    headers = {
-        "Authorization": MARKETAPP_API_TOKEN,
-        "Accept": "application/json",
-    }
-
-    cursor = None
-    items_map = {}
-    no_new_pages = 0
-    extra_params = dict(extra_params or {})
-
-    timeout = httpx.Timeout(connect=15.0, read=30.0, write=20.0, pool=30.0)
-    total_pages = page_limit or MAX_PAGES
-
-    async with httpx.AsyncClient(timeout=timeout, follow_redirects=True) as client:
-        for page_no in range(1, total_pages + 1):
-            params = {
-                "limit": 100,
-                "filter_by": extra_params.get("filter_by", "onsale"),
-            }
-
-            for key, value in extra_params.items():
-                if key in {"limit", "cursor", "filter_by"}:
-                    continue
-                if value is None:
-                    continue
-                if isinstance(value, str) and value == "":
-                    continue
-                params[key] = value
-
-            if cursor:
-                params["cursor"] = cursor
-
-            resp = await safe_get(
-                client,
-                api_url,
-                headers=headers,
-                params=params,
-                retries=2,
-                fail_soft=fail_soft,
-            )
-
-            if resp is None:
-                return []
-
-            if resp.status_code == 400:
-                body_text = resp.text[:2000]
-                if "Invalid cursor format" in body_text:
-                    print(f"DEBUG {mode.upper()} STOP invalid cursor at page {page_no}")
-                    break
-                if fail_soft:
-                    print(f"DEBUG {mode.upper()} FAIL_SOFT 400 page {page_no}: {body_text[:200]}")
-                    return []
-                resp.raise_for_status()
-
-            if resp.status_code >= 400:
-                if fail_soft:
-                    print(f"DEBUG {mode.upper()} FAIL_SOFT {resp.status_code} page {page_no}: {resp.text[:200]}")
-                    return []
-                resp.raise_for_status()
-
-            payload = resp.json()
-            raw_items = get_items_list(payload)
-
-            if not raw_items:
-                print(f"DEBUG {mode.upper()} STOP empty page {page_no}")
-                break
-
-            before_count = len(items_map)
-
-            for raw in raw_items:
-                if not isinstance(raw, dict):
-                    continue
-
-                item = parse_item(raw, mode=mode)
-                if not item:
-                    continue
-
-                merge_lowest_price_item(items_map, item)
-
-            after_count = len(items_map)
-            added_count = after_count - before_count
-            print(f"DEBUG {mode.upper()} PAGE {page_no}: raw={len(raw_items)} new_unique={added_count} total={after_count} params={extra_params}")
-
-            if added_count == 0:
-                no_new_pages += 1
-            else:
-                no_new_pages = 0
-
-            if no_new_pages >= 3:
-                print(f"DEBUG {mode.upper()} STOP 3 pages no new unique")
-                break
-
-            next_cursor = None
-            if isinstance(payload, dict):
-                next_cursor = payload.get("cursor") or payload.get("next_cursor")
-                next_url = payload.get("next") or payload.get("next_page")
-                if isinstance(next_url, str):
-                    m = re.search(r"cursor=([^&]+)", next_url)
-                    if m:
-                        next_cursor = m.group(1)
-
-            if not next_cursor:
-                print(f"DEBUG {mode.upper()} STOP no next cursor")
-                break
-
-            cursor = next_cursor
-
-    return list(items_map.values())
+def html_escape(text: str) -> str:
+    return (
+        str(text)
+        .replace("&", "&amp;")
+        .replace("<", "&lt;")
+        .replace(">", "&gt;")
+    )
+
+
+def usd_after_add(ton_price: float, ton_usd_rate: float, add_usd: float) -> float:
+    return ton_price * ton_usd_rate + add_usd
 
 
 def username_clean(name: str) -> str:
@@ -661,13 +154,11 @@ def has_same_run(s: str, run_len: int, kind: str) -> bool:
         chunk = s[i:i + run_len]
         if len(set(chunk)) != 1:
             continue
-
         ch = chunk[0]
         if kind == "alpha" and ch.isalpha():
             return True
         if kind == "digit" and ch.isdigit():
             return True
-
     return False
 
 
@@ -701,16 +192,131 @@ def pick_closest_by_price(candidates, target_price):
     )
 
 
-async def fetch_best_match_by_query(length_value: int, rule_name: str, run_len, kind: str):
-    cache_key = (length_value, rule_name, run_len, kind)
-    if cache_key in QUERY_RESULT_CACHE:
-        return QUERY_RESULT_CACHE[cache_key]
+def to_float(value, default=0.0):
+    if value is None:
+        return default
+    if isinstance(value, (int, float)):
+        return float(value)
 
-    base_params = {
-        "filter_by": "onsale",
-        "attrs": [f"Length~{length_value}"],
-        "sort_by": "price_asc",
+    s = str(value).strip()
+    s = s.replace(",", "")
+    s = s.replace("$", "")
+    s = s.replace("TON", "")
+    s = s.replace("ton", "")
+    s = s.replace("≈", "")
+    s = s.replace("~", "")
+
+    m = re.search(r"-?\d+(?:\.\d+)?", s)
+    if not m:
+        return default
+    try:
+        return float(m.group(0))
+    except Exception:
+        return default
+
+
+async def fetch_ton_usd_rate():
+    override = os.environ.get("TON_USD_OVERRIDE", "").strip()
+    if override:
+        try:
+            return float(override)
+        except Exception:
+            pass
+
+    url = "https://api.coingecko.com/api/v3/simple/price"
+    params = {
+        "ids": "the-open-network",
+        "vs_currencies": "usd",
     }
+
+    try:
+        async with httpx.AsyncClient(timeout=20) as client:
+            resp = await client.get(url, params=params)
+            resp.raise_for_status()
+            data = resp.json()
+            return float(data["the-open-network"]["usd"])
+    except Exception:
+        return 0.0
+
+
+def add_or_replace_query(base_url: str, query_value: str) -> str:
+    if not base_url:
+        return ""
+
+    if "query=" in base_url:
+        return re.sub(r"query=[^&]*", f"query={quote(query_value)}", base_url)
+
+    sep = "&" if "?" in base_url else "?"
+    return f"{base_url}{sep}query={quote(query_value)}"
+
+
+async def extract_first_row_from_page(page, expected_length: int):
+    row_locator = page.locator("table tbody tr")
+    count = await row_locator.count()
+    if count == 0:
+        row_locator = page.locator("tr")
+        count = await row_locator.count()
+
+    for i in range(count):
+        row = row_locator.nth(i)
+        text = await row.inner_text()
+        if not text or "@" not in text:
+            continue
+
+        name_match = re.search(r"@[A-Za-z0-9_]{4,32}", text)
+        if not name_match:
+            continue
+
+        name = name_match.group(0)
+        if len(name.lstrip("@")) != expected_length:
+            continue
+
+        ton_candidates = re.findall(r"(?<!\$)\b\d+(?:,\d{3})*(?:\.\d+)?\b", text)
+        ton_price = 0.0
+        if ton_candidates:
+            for raw in ton_candidates:
+                val = to_float(raw, 0.0)
+                if val > 0:
+                    ton_price = val
+                    break
+
+        if ton_price <= 0:
+            continue
+
+        return {
+            "name": name,
+            "length": expected_length,
+            "ton_price": ton_price,
+            "is_on_sale": True,
+            "is_restricted": False,
+            "raw_text": text,
+        }
+
+    return None
+
+
+async def fetch_query_result(browser, url: str, expected_length: int):
+    context = await browser.new_context()
+    page = await context.new_page()
+
+    try:
+        await page.goto(url, wait_until="domcontentloaded", timeout=30000)
+        await page.wait_for_timeout(3000)
+
+        try:
+            await page.wait_for_selector("tr", timeout=10000)
+        except PlaywrightTimeoutError:
+            pass
+
+        result = await extract_first_row_from_page(page, expected_length)
+        return result
+    finally:
+        await context.close()
+
+
+async def fetch_best_match_by_query(browser, base_url: str, length_value: int, rule_name: str, run_len, kind: str):
+    if not base_url:
+        return None
 
     if kind == "alpha":
         queries = [ch * run_len for ch in USERNAME_QUERY_ALPHA_CHARS]
@@ -719,78 +325,45 @@ async def fetch_best_match_by_query(length_value: int, rule_name: str, run_len, 
     elif kind == "fixed":
         queries = [rule_name]
     else:
-        QUERY_RESULT_CACHE[cache_key] = None
         return None
 
-    best = None
-
     for q in queries:
-        params = dict(base_params)
-        params["query"] = q
+        url = add_or_replace_query(base_url, q)
+        try:
+            result = await fetch_query_result(browser, url, length_value)
+        except Exception as e:
+            print(f"DEBUG PLAYWRIGHT FAIL length={length_value} rule={rule_name} query={q} error={repr(e)}")
+            result = None
 
-        items = await fetch_collection_items(
-            USERNAMES_COLLECTION_ADDRESS,
-            mode="usernames",
-            extra_params=params,
-            fail_soft=True,
-            page_limit=1,
-        )
+        if result and rule_match(username_clean(result["name"]), rule_name, run_len, kind):
+            print(f"DEBUG PLAYWRIGHT HIT length={length_value} rule={rule_name} query={q} name={result['name']}")
+            return result
 
-        candidates = [
-            x for x in items
-            if x["length"] == length_value
-            and rule_match(username_clean(x["name"]), rule_name, run_len, kind)
-        ]
-        candidates = sort_items(candidates)
-
-        if candidates:
-            best = candidates[0]
-            print(
-                f"DEBUG QUERY HIT length={length_value} "
-                f"rule={rule_name} kind={kind} query={q} name={best['name']}"
-            )
-            break
-
-    QUERY_RESULT_CACHE[cache_key] = best
-    return best
+    return None
 
 
-async def build_username_section(all_items, length_value: int):
+async def fetch_all_username_items():
+    # Playwright 版这里不再扫全站全量 API
+    return []
+
+
+async def build_username_section(browser, base_url: str, length_value: int):
     rules = USERNAME_RULES[length_value]
     extra_count = USERNAME_EXTRA_COUNT[length_value]
 
-    full_pool = sort_items([
-        x for x in all_items
-        if x["length"] == length_value
-        and not (x["is_on_sale"] is False and x["ton_price"] <= 0)
-    ])
-
-    used = set()
     selected = []
+    used = set()
     last_price = None
 
     for rule_name, run_len, kind in rules:
-        chosen = await fetch_best_match_by_query(length_value, rule_name, run_len, kind)
+        chosen = await fetch_best_match_by_query(browser, base_url, length_value, rule_name, run_len, kind)
 
         if chosen and chosen["name"].lower() in used:
             chosen = None
 
         if chosen is None:
-            local_matches = [
-                x for x in full_pool
-                if x["name"].lower() not in used
-                and rule_match(username_clean(x["name"]), rule_name, run_len, kind)
-            ]
-            local_matches = sort_items(local_matches)
-
-            if local_matches:
-                chosen = local_matches[0]
-            else:
-                remaining = [x for x in full_pool if x["name"].lower() not in used]
-                chosen = pick_closest_by_price(remaining, last_price)
-
-        if not chosen:
-            break
+            # Playwright 精准查不到时，不补全站大抓取，直接跳过
+            continue
 
         used.add(chosen["name"].lower())
         selected.append(chosen)
@@ -798,68 +371,99 @@ async def build_username_section(all_items, length_value: int):
         if chosen["ton_price"] > 0:
             last_price = chosen["ton_price"]
 
-    remaining = [x for x in full_pool if x["name"].lower() not in used]
-    for x in remaining[:extra_count]:
-        used.add(x["name"].lower())
-        selected.append(x)
+    # 其余补位：继续按最低价思路，用通配 query 快速补
+    if extra_count > 0 and base_url:
+        filler_queries = [
+            "", "a", "e", "i", "o", "u",
+            "1", "6", "8", "9", "0",
+            "aa", "11", "66", "88",
+        ]
+        for q in filler_queries:
+            if len(selected) >= len(rules) + extra_count:
+                break
 
-    return selected
+            url = add_or_replace_query(base_url, q)
+            try:
+                result = await fetch_query_result(browser, url, length_value)
+            except Exception:
+                result = None
 
+            if not result:
+                continue
+            if result["name"].lower() in used:
+                continue
 
-def number_digits(name: str) -> str:
-    return re.sub(r"\D", "", name or "")
+            used.add(result["name"].lower())
+            selected.append(result)
 
-
-def number_tail(name: str) -> str:
-    digits = number_digits(name)
-    if digits.startswith("888"):
-        return digits[3:]
-    return digits
-
-
-def floor_pick(items, predicate):
-    matched = [x for x in items if predicate(x)]
-    if not matched:
-        return None
-
-    matched.sort(
-        key=lambda x: (
-            x["ton_price"] <= 0,
-            x["ton_price"] if x["ton_price"] > 0 else 10**18,
-            x["name"],
-        )
-    )
-    return matched[0]
+    return selected[: len(rules) + extra_count]
 
 
-def build_number_floor(items):
-    valid = [x for x in items if x["ton_price"] > 0 and not x["is_restricted"]]
+async def fetch_numbers_floor(browser, base_url: str):
+    if not base_url:
+        return {"has4": None, "no4": None}
 
-    def has4(x):
-        tail = number_tail(x["name"])
-        return "4" in tail
+    context = await browser.new_context()
+    page = await context.new_page()
 
-    def no4(x):
-        tail = number_tail(x["name"])
-        return "4" not in tail
+    try:
+        await page.goto(base_url, wait_until="domcontentloaded", timeout=30000)
+        await page.wait_for_timeout(3000)
 
-    return {
-        "has4": floor_pick(valid, has4),
-        "no4": floor_pick(valid, no4),
-    }
+        rows = page.locator("table tbody tr")
+        count = await rows.count()
+        if count == 0:
+            rows = page.locator("tr")
+            count = await rows.count()
 
+        has4_item = None
+        no4_item = None
 
-def usd_after_add(ton_price: float, ton_usd_rate: float, add_usd: float) -> float:
-    return ton_price * ton_usd_rate + add_usd
+        for i in range(count):
+            row = rows.nth(i)
+            text = await row.inner_text()
+            if not text or "+888" not in text:
+                continue
 
+            num_match = re.search(r"\+888[\s\d]{4,20}", text)
+            if not num_match:
+                continue
 
-def html_escape(text: str) -> str:
-    return (
-        str(text)
-        .replace("&", "&amp;")
-        .replace("<", "&lt;")
-        .replace(">", "&gt;")
-    )
+            name = re.sub(r"\s+", " ", num_match.group(0)).strip()
+            ton_candidates = re.findall(r"(?<!\$)\b\d+(?:,\d{3})*(?:\.\d+)?\b", text)
+            ton_price = 0.0
+            for raw in ton_candidates:
+                val = to_float(raw, 0.0)
+                if val > 0:
+                    ton_price = val
+                    break
+
+            if ton_price <= 0:
+                continue
+
+            digits = re.sub(r"\D", "", name)
+            tail = digits[3:] if digits.startswith("888") else digits
+
+            item = {
+                "name": name,
+                "ton_price": ton_price,
+                "is_restricted": "restricted" in text.lower(),
+            }
+
+            if item["is_restricted"]:
+                continue
+
+            if "4" in tail and has4_item is None:
+                has4_item = item
+            if "4" not in tail and no4_item is None:
+                no4_item = item
+
+            if has4_item and no4_item:
+                break
+
+        return {"has4": has4_item, "no4": no4_item}
+    finally:
+        await context.close()
 
 
 def build_usernames_message(section_5, section_6, section_7, ton_usd_rate):
@@ -1027,38 +631,23 @@ async def upsert_message(chat_id: str, message_id, text: str, label: str, parse_
     print(f"IMPORTANT: Update {label} secret to:", new_message_id)
 
 
-async def fetch_all_username_items():
-    items = await fetch_collection_items(
-        USERNAMES_COLLECTION_ADDRESS,
-        mode="usernames",
-        extra_params={},
-        fail_soft=False,
-    )
-    print(f"DEBUG FULL USERNAMES TOTAL={len(items)}")
-    return items
-
-
 async def main():
     ton_usd_rate = await fetch_ton_usd_rate()
 
-    all_username_items = await fetch_all_username_items()
+    async with async_playwright() as p:
+        browser = await p.chromium.launch(headless=True)
 
-    section_5 = await build_username_section(all_username_items, 5)
-    section_6 = await build_username_section(all_username_items, 6)
-    section_7 = await build_username_section(all_username_items, 7)
+        try:
+            section_5 = await build_username_section(browser, USERNAMES_5_URL, 5) if USERNAMES_5_URL else []
+            section_6 = await build_username_section(browser, USERNAMES_6_URL, 6) if USERNAMES_6_URL else []
+            section_7 = await build_username_section(browser, USERNAMES_7_URL, 7) if USERNAMES_7_URL else []
 
-    number_floor = {}
-    if NUMBERS_COLLECTION_ADDRESS:
-        number_items = await fetch_collection_items(
-            NUMBERS_COLLECTION_ADDRESS,
-            mode="numbers",
-            extra_params={},
-            fail_soft=False,
-        )
-        number_floor = build_number_floor(number_items)
+            number_floor = await fetch_numbers_floor(browser, NUMBERS_URL) if NUMBERS_URL else {"has4": None, "no4": None}
+        finally:
+            await browser.close()
 
     usernames_text = build_usernames_message(section_5, section_6, section_7, ton_usd_rate)
-    numbers_text = build_numbers_message(number_floor, ton_usd_rate) if NUMBERS_COLLECTION_ADDRESS else None
+    numbers_text = build_numbers_message(number_floor, ton_usd_rate) if NUMBERS_URL else None
     promo_text = build_promo_message_html()
     promo_reply_markup = build_promo_reply_markup()
 

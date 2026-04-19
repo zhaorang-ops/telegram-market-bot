@@ -524,9 +524,14 @@ async def extract_first_row_from_page(page, expected_length: int):
         if len(name.lstrip("@")) != expected_length:
             continue
 
-        ton_candidates = re.findall(r"(?<!\$)\b\d+(?:,\d{3})*(?:\.\d+)?\b", text)
+        price_match = re.search(r"▽\s*([\d,]+(?:\.\d+)?)", text)
         ton_price = 0.0
-        if ton_candidates:
+        if price_match:
+            ton_price = to_float(price_match.group(1), 0.0)
+
+        if ton_price <= 0:
+            text_wo_name = text.replace(name, " ")
+            ton_candidates = re.findall(r"(?<!\$)\b\d+(?:,\d{3})*(?:\.\d+)?\b", text_wo_name)
             for raw in ton_candidates:
                 val = to_float(raw, 0.0)
                 if val > 0:
@@ -754,13 +759,22 @@ async def fetch_numbers_floor(browser, base_url: str):
                 continue
 
             name = re.sub(r"\s+", " ", num_match.group(0)).strip()
-            ton_candidates = re.findall(r"(?<!\$)\b\d+(?:,\d{3})*(?:\.\d+)?\b", text)
+
+            price_match = re.search(r"▽\s*([\d,]+(?:\.\d+)?)", text)
             ton_price = 0.0
-            for raw in ton_candidates:
-                val = to_float(raw, 0.0)
-                if val > 0:
-                    ton_price = val
-                    break
+            if price_match:
+                ton_price = to_float(price_match.group(1), 0.0)
+
+            usd_price = extract_usd_from_text(text)
+
+            if ton_price <= 0:
+                text_wo_name = text.replace(name, " ")
+                ton_candidates = re.findall(r"(?<!\$)\b\d+(?:,\d{3})*(?:\.\d+)?\b", text_wo_name)
+                for raw in ton_candidates:
+                    val = to_float(raw, 0.0)
+                    if val > 100:
+                        ton_price = val
+                        break
 
             if ton_price <= 0:
                 continue
@@ -771,7 +785,7 @@ async def fetch_numbers_floor(browser, base_url: str):
             item = {
                 "name": name,
                 "ton_price": ton_price,
-                "usd_price": extract_usd_from_text(text),
+                "usd_price": usd_price,
                 "is_restricted": "restricted" in text.lower(),
             }
 

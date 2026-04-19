@@ -333,6 +333,17 @@ def extract_price_from_dict(raw: dict) -> float:
     return scored[0][1]
 
 
+def extract_usd_from_dict(raw: dict) -> float:
+    for key, value in deep_walk(raw):
+        key_l = str(key).lower()
+        if "usd" not in key_l:
+            continue
+        num = to_float(value, 0.0)
+        if num > 0:
+            return num
+    return 0.0
+
+
 def parse_candidates_from_json_payload(payload, expected_length: int):
     candidates = {}
 
@@ -393,13 +404,7 @@ def parse_number_candidates_from_json_payload(payload):
         if not name or price <= 0:
             return
 
-        usd_price = 0.0
-        for k, v in deep_walk(raw_obj):
-            key_l = str(k).lower()
-            if "usd" in key_l:
-                usd_price = to_float(v, 0.0)
-                if usd_price > 0:
-                    break
+        usd_price = extract_usd_from_dict(raw_obj)
 
         restricted = False
         for k, v in deep_walk(raw_obj):
@@ -558,7 +563,6 @@ async def fetch_query_result(browser, url: str, expected_length: int):
         await page.goto(url, wait_until="domcontentloaded", timeout=30000)
         await page.wait_for_timeout(3000)
 
-        # 优先读前端响应
         json_candidates = []
         for response in responses[-20:]:
             try:
@@ -578,7 +582,6 @@ async def fetch_query_result(browser, url: str, expected_length: int):
         if json_candidates:
             return json_candidates[0]
 
-        # 取不到再回退 DOM
         try:
             await page.wait_for_selector("tr", timeout=10000)
         except PlaywrightTimeoutError:
@@ -692,7 +695,6 @@ async def fetch_numbers_floor(browser, base_url: str):
         await page.goto(base_url, wait_until="domcontentloaded", timeout=30000)
         await page.wait_for_timeout(3000)
 
-        # 先优先读前端 JSON
         json_candidates = []
         for response in responses[-20:]:
             try:
@@ -728,7 +730,6 @@ async def fetch_numbers_floor(browser, base_url: str):
             if has4_item or no4_item:
                 return {"has4": has4_item, "no4": no4_item}
 
-        # 前端 JSON 没抓到，再回退 DOM
         rows = page.locator("table tbody tr")
         count = await rows.count()
         if count == 0:
@@ -842,7 +843,7 @@ def build_usernames_message(section_5, section_6, section_7, ton_usd_rate):
     lines.append(f"更多用户名咨询客服，更新时间：{now_str}")
 
     body = html_escape("\n".join(lines))
-    return f"多用户名价格实时更新（点开展开）更多定制联系客服\n<blockquote expandable>{body}</blockquote>"
+    return f"多用户名价格实时更新（点开展开）\n<blockquote expandable>{body}</blockquote>"
 
 
 def build_numbers_message(number_floor, ton_usd_rate):

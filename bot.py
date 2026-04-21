@@ -628,12 +628,19 @@ async def fetch_numbers_floor(browser, base_url: str):
             except Exception:
                 continue
 
-            if cell_count < 2:
+            # 关键修复：匿名号表第一列是复选框，第二列才是名称，第三列才是价格
+            if cell_count >= 3:
+                name_idx = 1
+                price_idx = 2
+            elif cell_count >= 2:
+                name_idx = 0
+                price_idx = 1
+            else:
                 continue
 
             try:
-                name_text = await cells.nth(0).inner_text()
-                price_text = await cells.nth(1).inner_text()
+                name_text = await cells.nth(name_idx).inner_text()
+                price_text = await cells.nth(price_idx).inner_text()
                 row_text = await row.inner_text()
             except Exception:
                 continue

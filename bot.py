@@ -105,7 +105,12 @@ USERNAME_QUERY_DIGIT_CHARS = ["6", "8", "9", "0", "1", "2", "3", "4", "5", "7"]
 def build_promo_reply_markup():
     return {
         "inline_keyboard": [
-            [{"text": PROMO_BUTTON_TEXT, "url": PROMO_BUTTON_URL}]
+            [
+                {
+                    "text": PROMO_BUTTON_TEXT,
+                    "url": PROMO_BUTTON_URL,
+                }
+            ]
         ]
     }
 
@@ -144,7 +149,7 @@ def sort_items(items):
             x["ton_price"] <= 0,
             price_or_inf(x),
             x["name"].lower(),
-        ),
+        )
     )
 
 
@@ -178,6 +183,22 @@ def rule_match(clean: str, rule_name: str, run_len, kind: str) -> bool:
     return False
 
 
+def pick_closest_by_price(candidates, target_price):
+    if not candidates:
+        return None
+    if target_price is None or target_price <= 0:
+        return sort_items(candidates)[0]
+
+    return min(
+        candidates,
+        key=lambda x: (
+            abs(price_or_inf(x) - target_price),
+            price_or_inf(x),
+            x["name"].lower(),
+        ),
+    )
+
+
 def to_float(value, default=0.0):
     if value is None:
         return default
@@ -187,8 +208,6 @@ def to_float(value, default=0.0):
     s = str(value).strip()
     s = s.replace(",", "")
     s = s.replace("$", "")
-    s = s.replace("USDT", "")
-    s = s.replace("USD", "")
     s = s.replace("TON", "")
     s = s.replace("ton", "")
     s = s.replace("≈", "")
@@ -241,13 +260,37 @@ def normalize_username(value: str) -> str:
     return text
 
 
-def extract_primary_price_from_dict(raw: dict) -> float:
+def looks_like_888_number(value: str) -> bool:
+    if not isinstance(value, str):
+        return False
+    text = value.strip()
+    digits = re.sub(r"\D", "", text)
+    return digits.startswith("888") and len(digits) >= 7
+
+
+def normalize_888_number(value: str) -> str:
+    digits = re.sub(r"\D", "", str(value))
+    if not digits.startswith("888"):
+        return str(value).strip()
+
+    tail = digits[3:]
+    if len(tail) == 4:
+        return f"+888 {tail[0]} {tail[1:]}"
+    if len(tail) == 8:
+        return f"+888 {tail[:4]} {tail[4:]}"
+    return f"+{digits}"
+
+
+def extract_price_from_dict(raw: dict) -> float:
     direct_candidates = [
-        raw.get("price"),
-        raw.get("full_price"),
         raw.get("min_bid"),
-        raw.get("amount"),
+        raw.get("max_bid"),
+        raw.get("full_price"),
+        raw.get("price"),
+        raw.get("price_ton"),
+        raw.get("ton_price"),
         raw.get("floor_price"),
+        raw.get("amount"),
     ]
 
     for v in direct_candidates:
@@ -260,21 +303,45 @@ def extract_primary_price_from_dict(raw: dict) -> float:
     scored = []
     for key, value in deep_walk(raw):
         key_l = str(key).lower()
-        if any(x in key_l for x in ["usd", "usdt", "ton"]):
+        if not any(x in key_l for x in ["price", "bid", "ton", "amount"]):
             continue
-        if not any(x in key_l for x in ["price", "bid", "amount"]):
+        if "usd" in key_l:
             continue
+
         num = to_float(value, 0.0)
-        if num > 0:
-            if num > 1_000_000:
-                num = num / 1_000_000_000
-            scored.append((key_l, num))
+        if num <= 0:
+            continue
+
+        if num > 1_000_000:
+            num = num / 1_000_000_000
+
+        score = 0
+        if key_l == "min_bid":
+            score += 100
+        if key_l == "max_bid":
+            score += 95
+        if key_l == "price":
+            score += 90
+        if "ton" in key_l:
+            score += 80
+        scored.append((score, num))
 
     if not scored:
         return 0.0
 
-    scored.sort(key=lambda x: x[1])
+    scored.sort(key=lambda x: (-x[0], x[1]))
     return scored[0][1]
+
+
+def extract_usd_from_dict(raw: dict) -> float:
+    for key, value in deep_walk(raw):
+        key_l = str(key).lower()
+        if "usd" not in key_l:
+            continue
+        num = to_float(value, 0.0)
+        if num > 0:
+            return num
+    return 0.0
 
 
 def parse_candidates_from_json_payload(payload, expected_length: int):
@@ -283,6 +350,7 @@ def parse_candidates_from_json_payload(payload, expected_length: int):
     def add_candidate(name: str, price: float, raw_obj):
         if not name or price <= 0:
             return
+
         key = name.lower()
         old = candidates.get(key)
         item = {
@@ -322,11 +390,78 @@ def parse_candidates_from_json_payload(payload, expected_length: int):
             if not names:
                 continue
 
-            price = extract_primary_price_from_dict(obj)
+            price = extract_price_from_dict(obj)
             for name in names:
                 add_candidate(name, price, obj)
 
     return sort_items(list(candidates.values()))
+
+
+def parse_number_candidates_from_json_payload(payload):
+    candidates = {}
+
+    def add_candidate(name: str, price: float, raw_obj):
+        if not name or price <= 0:
+            return
+
+        usd_price = extract_usd_from_dict(raw_obj)
+
+        restricted = False
+        for k, v in deep_walk(raw_obj):
+            key_l = str(k).lower()
+            if "restricted" in key_l:
+                restricted = str(v).strip().lower() in {"true", "1", "yes", "restricted"}
+                break
+            if key_l == "status" and isinstance(v, str) and "restricted" in v.lower():
+                restricted = True
+                break
+
+        key = name.lower()
+        old = candidates.get(key)
+        item = {
+            "name": name,
+            "ton_price": price,
+            "usd_price": usd_price,
+            "is_restricted": restricted,
+            "raw": raw_obj,
+        }
+        if old is None or price < old["ton_price"]:
+            candidates[key] = item
+
+    roots = payload if isinstance(payload, list) else [payload]
+
+    for root in roots:
+        if not isinstance(root, dict):
+            continue
+
+        maybe_objects = [root]
+        for _, v in deep_walk(root):
+            if isinstance(v, dict):
+                maybe_objects.append(v)
+
+        for obj in maybe_objects:
+            names = []
+
+            for _, v in obj.items():
+                if isinstance(v, str) and looks_like_888_number(v):
+                    names.append(normalize_888_number(v))
+
+            if not names:
+                for _, v in deep_walk(obj):
+                    if isinstance(v, str) and looks_like_888_number(v):
+                        names.append(normalize_888_number(v))
+
+            if not names:
+                continue
+
+            price = extract_price_from_dict(obj)
+            for name in names:
+                add_candidate(name, price, obj)
+
+    return sorted(
+        candidates.values(),
+        key=lambda x: (x["ton_price"] <= 0, x["ton_price"], x["name"])
+    )
 
 
 async def fetch_ton_usd_rate():
@@ -356,8 +491,10 @@ async def fetch_ton_usd_rate():
 def add_or_replace_query(base_url: str, query_value: str) -> str:
     if not base_url:
         return ""
+
     if "query=" in base_url:
         return re.sub(r"query=[^&]*", f"query={quote(query_value)}", base_url)
+
     sep = "&" if "?" in base_url else "?"
     return f"{base_url}{sep}query={quote(query_value)}"
 
@@ -437,9 +574,11 @@ async def fetch_query_result(browser, url: str, expected_length: int):
                 ctype = (response.headers.get("content-type") or "").lower()
                 if "application/json" not in ctype:
                     continue
+
                 body = await response.text()
                 if not body or body[0] not in "{[":
                     continue
+
                 payload = json.loads(body)
                 json_candidates.extend(parse_candidates_from_json_payload(payload, expected_length))
             except Exception:
@@ -453,7 +592,8 @@ async def fetch_query_result(browser, url: str, expected_length: int):
         except PlaywrightTimeoutError:
             pass
 
-        return await extract_first_row_from_page(page, expected_length)
+        result = await extract_first_row_from_page(page, expected_length)
+        return result
     finally:
         await context.close()
 
@@ -487,12 +627,17 @@ async def fetch_best_match_by_query(browser, base_url: str, length_value: int, r
     return None
 
 
+async def fetch_all_username_items():
+    return []
+
+
 async def build_username_section(browser, base_url: str, length_value: int):
     rules = USERNAME_RULES[length_value]
     extra_count = USERNAME_EXTRA_COUNT[length_value]
 
     selected = []
     used = set()
+    last_price = None
 
     for rule_name, run_len, kind in rules:
         chosen = await fetch_best_match_by_query(browser, base_url, length_value, rule_name, run_len, kind)
@@ -506,8 +651,15 @@ async def build_username_section(browser, base_url: str, length_value: int):
         used.add(chosen["name"].lower())
         selected.append(chosen)
 
+        if chosen["ton_price"] > 0:
+            last_price = chosen["ton_price"]
+
     if extra_count > 0 and base_url:
-        filler_queries = ["", "a", "e", "i", "o", "u", "1", "6", "8", "9", "0", "aa", "11", "66", "88"]
+        filler_queries = [
+            "", "a", "e", "i", "o", "u",
+            "1", "6", "8", "9", "0",
+            "aa", "11", "66", "88",
+        ]
         for q in filler_queries:
             if len(selected) >= len(rules) + extra_count:
                 break
@@ -530,67 +682,6 @@ async def build_username_section(browser, base_url: str, length_value: int):
     return selected[: len(rules) + extra_count]
 
 
-async def wait_numbers_rows(page, timeout_ms=25000):
-    selectors = ["table tbody tr", "tbody tr", "tr"]
-    for sel in selectors:
-        try:
-            await page.wait_for_selector(sel, timeout=timeout_ms)
-            return True
-        except Exception:
-            pass
-    return False
-
-
-def parse_number_price_cell(price_text: str):
-    lines = [x.strip() for x in str(price_text).splitlines() if x.strip()]
-
-    primary_value = 0.0
-    ton_value = 0.0
-    usd_value = 0.0
-    display_currency = "TON"
-
-    if lines:
-        primary_value = to_float(lines[0], 0.0)
-
-    for line in lines[1:]:
-        if "ton" in line.lower():
-            ton_value = to_float(line, 0.0)
-        if "$" in line:
-            usd_value = extract_usd_from_text(line)
-
-    if primary_value > 0 and ton_value > 0 and abs(primary_value - ton_value) > 1:
-        display_currency = "USDT"
-        return {
-            "display_price": primary_value,
-            "display_currency": "USDT",
-            "ton_price": ton_value,
-            "usd_price": usd_value,
-        }
-
-    if ton_value > 0:
-        return {
-            "display_price": ton_value,
-            "display_currency": "TON",
-            "ton_price": ton_value,
-            "usd_price": usd_value,
-        }
-
-    if primary_value > 0:
-        return {
-            "display_price": primary_value,
-            "display_currency": "TON",
-            "ton_price": primary_value,
-            "usd_price": usd_value,
-        }
-
-    return {
-        "display_price": 0.0,
-        "display_currency": "TON",
-        "ton_price": 0.0,
-        "usd_price": usd_value,
-    }
-
-
 async def fetch_numbers_floor(browser, base_url: str):
     if not base_url:
         return {"has4": None, "no4": None}
@@ -598,20 +689,54 @@ async def fetch_numbers_floor(browser, base_url: str):
     context = await browser.new_context()
     page = await context.new_page()
 
+    responses = []
+
+    def on_response(response):
+        responses.append(response)
+
+    page.on("response", on_response)
+
     try:
-        await page.goto(base_url, wait_until="domcontentloaded", timeout=60000)
-
-        ready = await wait_numbers_rows(page, timeout_ms=25000)
-        if not ready:
-            return {"has4": None, "no4": None}
-
+        await page.goto(base_url, wait_until="domcontentloaded", timeout=30000)
         await page.wait_for_timeout(3000)
+
+        json_candidates = []
+        for response in responses[-20:]:
+            try:
+                ctype = (response.headers.get("content-type") or "").lower()
+                if "application/json" not in ctype:
+                    continue
+
+                body = await response.text()
+                if not body or body[0] not in "{[":
+                    continue
+
+                payload = json.loads(body)
+                json_candidates.extend(parse_number_candidates_from_json_payload(payload))
+            except Exception:
+                continue
+
+        if json_candidates:
+            valid = [x for x in json_candidates if x["ton_price"] > 0 and not x["is_restricted"]]
+
+            def has4(x):
+                digits = re.sub(r"\D", "", x["name"])
+                tail = digits[3:] if digits.startswith("888") else digits
+                return "4" in tail
+
+            def no4(x):
+                digits = re.sub(r"\D", "", x["name"])
+                tail = digits[3:] if digits.startswith("888") else digits
+                return "4" not in tail
+
+            has4_item = next((x for x in valid if has4(x)), None)
+            no4_item = next((x for x in valid if no4(x)), None)
+
+            if has4_item or no4_item:
+                return {"has4": has4_item, "no4": no4_item}
 
         rows = page.locator("table tbody tr")
         count = await rows.count()
-        if count == 0:
-            rows = page.locator("tbody tr")
-            count = await rows.count()
         if count == 0:
             rows = page.locator("tr")
             count = await rows.count()
@@ -621,41 +746,37 @@ async def fetch_numbers_floor(browser, base_url: str):
 
         for i in range(count):
             row = rows.nth(i)
-
             try:
-                cells = row.locator("td")
-                cell_count = await cells.count()
+                text = await row.inner_text()
             except Exception:
                 continue
 
-            # 关键修复：匿名号表第一列是复选框，第二列才是名称，第三列才是价格
-            if cell_count >= 3:
-                name_idx = 1
-                price_idx = 2
-            elif cell_count >= 2:
-                name_idx = 0
-                price_idx = 1
-            else:
+            if not text or "+888" not in text:
                 continue
 
-            try:
-                name_text = await cells.nth(name_idx).inner_text()
-                price_text = await cells.nth(price_idx).inner_text()
-                row_text = await row.inner_text()
-            except Exception:
+            num_match = re.search(r"\+888[\s\d]{4,20}", text)
+            if not num_match:
                 continue
 
-            if "+888" not in name_text:
-                continue
+            name = re.sub(r"\s+", " ", num_match.group(0)).strip()
 
-            name_match = re.search(r"\+888[\s\d]{4,20}", name_text)
-            if not name_match:
-                continue
+            price_match = re.search(r"▽\s*([\d,]+(?:\.\d+)?)", text)
+            ton_price = 0.0
+            if price_match:
+                ton_price = to_float(price_match.group(1), 0.0)
 
-            name = re.sub(r"\s+", " ", name_match.group(0)).strip()
-            price_info = parse_number_price_cell(price_text)
+            usd_price = extract_usd_from_text(text)
 
-            if price_info["display_price"] <= 0 and price_info["ton_price"] <= 0:
+            if ton_price <= 0:
+                text_wo_name = text.replace(name, " ")
+                ton_candidates = re.findall(r"(?<!\$)\b\d+(?:,\d{3})*(?:\.\d+)?\b", text_wo_name)
+                for raw in ton_candidates:
+                    val = to_float(raw, 0.0)
+                    if val > 100:
+                        ton_price = val
+                        break
+
+            if ton_price <= 0:
                 continue
 
             digits = re.sub(r"\D", "", name)
@@ -663,11 +784,9 @@ async def fetch_numbers_floor(browser, base_url: str):
 
             item = {
                 "name": name,
-                "ton_price": price_info["ton_price"],
-                "usd_price": price_info["usd_price"],
-                "display_price": price_info["display_price"],
-                "display_currency": price_info["display_currency"],
-                "is_restricted": "restricted" in row_text.lower(),
+                "ton_price": ton_price,
+                "usd_price": usd_price,
+                "is_restricted": "restricted" in text.lower(),
             }
 
             if item["is_restricted"]:
@@ -702,6 +821,7 @@ def username_add_by_rule(item):
 
 def build_usernames_message(section_5, section_6, section_7, ton_usd_rate):
     now_str = datetime.now(TZ).strftime("%Y-%m-%d %H:%M:%S")
+
     lines = []
 
     lines.append("【5位用户名】")
@@ -746,21 +866,23 @@ def build_numbers_message(number_floor, ton_usd_rate):
 
     item = number_floor.get("has4")
     if item:
-        if item.get("display_currency") == "USDT" and item.get("display_price", 0.0) > 0:
-            out_price = item["display_price"] + NUMBER_ADD_USD["has4"]
+        base_usd = item.get("usd_price", 0.0)
+        if base_usd > 0:
+            usd_val = base_usd + NUMBER_ADD_USD["has4"]
         else:
-            out_price = item["ton_price"] * ton_usd_rate + NUMBER_ADD_USD["has4"]
-        lines.append(f"【含4正常】 {item['name']} - ${display_price_int(out_price)}")
+            usd_val = usd_after_add(item["ton_price"], ton_usd_rate, NUMBER_ADD_USD["has4"])
+        lines.append(f"【含4正常】 {item['name']} - ${display_price_int(usd_val)}")
     else:
         lines.append("【含4正常】 暂无数据")
 
     item = number_floor.get("no4")
     if item:
-        if item.get("display_currency") == "USDT" and item.get("display_price", 0.0) > 0:
-            out_price = item["display_price"] + NUMBER_ADD_USD["no4"]
+        base_usd = item.get("usd_price", 0.0)
+        if base_usd > 0:
+            usd_val = base_usd + NUMBER_ADD_USD["no4"]
         else:
-            out_price = item["ton_price"] * ton_usd_rate + NUMBER_ADD_USD["no4"]
-        lines.append(f"【无4正常】 {item['name']} - ${display_price_int(out_price)}")
+            usd_val = usd_after_add(item["ton_price"], ton_usd_rate, NUMBER_ADD_USD["no4"])
+        lines.append(f"【无4正常】 {item['name']} - ${display_price_int(usd_val)}")
     else:
         lines.append("【无4正常】 暂无数据")
 

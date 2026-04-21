@@ -451,8 +451,7 @@ async def fetch_query_result(browser, url: str, expected_length: int):
     page.on("response", on_response)
 
     try:
-        await page.
-        goto(url, wait_until="domcontentloaded", timeout=30000)
+        await page.goto(url, wait_until="domcontentloaded", timeout=30000)
         await page.wait_for_timeout(3000)
 
         json_candidates = []
@@ -853,7 +852,7 @@ async def edit_existing_message(chat_id: str, message_id, text: str, label: str,
         return False
 
     payload = {
-    "chat_id": chat_id,
+        "chat_id": chat_id,
         "message_id": message_id,
         "text": text,
         "disable_web_page_preview": True,
@@ -950,5 +949,5 @@ async def main():
     )
 
 
-if name == "__main__":
+if __name__ == "__main__":
     asyncio.run(main())

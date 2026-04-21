@@ -35,7 +35,7 @@ USERNAME_ADD_USD = {
     7: 50.0,
 }
 
-# TON 价格时才加这个
+# 只有匿名号主价格是 TON 时，才额外加这个
 NUMBER_ADD_USD = {
     "has4": 50.0,
     "no4": 50.0,
@@ -339,6 +339,17 @@ def extract_primary_price_from_dict(raw: dict) -> float:
     return scored[0][1]
 
 
+def extract_usd_from_dict(raw: dict) -> float:
+    for key, value in deep_walk(raw):
+        key_l = str(key).lower()
+        if "usd" not in key_l:
+            continue
+        num = to_float(value, 0.0)
+        if num > 0:
+            return num
+    return 0.0
+
+
 def has_usdt_hint(raw: dict) -> bool:
     for key, value in deep_walk(raw):
         key_l = str(key).lower()
@@ -353,7 +364,7 @@ def has_usdt_hint(raw: dict) -> bool:
 def parse_number_price_info_from_dict(raw: dict):
     ton_price = extract_ton_price_from_dict(raw)
     primary_price = extract_primary_price_from_dict(raw)
-    usd_price = extract_usd_from_text(str(raw)) or 0.0
+    usd_price = extract_usd_from_dict(raw)
 
     display_currency = "TON"
     display_price = 0.0
@@ -629,7 +640,7 @@ async def fetch_query_result(browser, url: str, expected_length: int):
                 if not body or body[0] not in "{[":
                     continue
 
-                payload = json.loads(body)
+                    payload = json.loads(body)
                 json_candidates.extend(parse_candidates_from_json_payload(payload, expected_length))
             except Exception:
                 continue
@@ -792,7 +803,6 @@ async def fetch_numbers_floor(browser, base_url: str):
         await page.goto(base_url, wait_until="domcontentloaded", timeout=30000)
         await page.wait_for_timeout(3000)
 
-        # 先用前端接口一页数据
         json_candidates = []
         for response in responses[-20:]:
             try:
@@ -828,7 +838,6 @@ async def fetch_numbers_floor(browser, base_url: str):
             if has4_item or no4_item:
                 return {"has4": has4_item, "no4": no4_item}
 
-        # 前端接口拿不到，再回退 DOM，并且按价格列解析
         rows = page.locator("table tbody tr")
         count = await rows.count()
         if count == 0:
@@ -844,35 +853,23 @@ async def fetch_numbers_floor(browser, base_url: str):
                 cells = row.locator("td")
                 cell_count = await cells.count()
                 if cell_count < 2:
-                    text = await row.inner_text()
-                    if not text or "+888" not in text:
-                        continue
-                    name_match = re.search(r"\+888[\s\d]{4,20}", text)
-                    if not name_match:
-                        continue
-                    name = re.sub(r"\s+", " ", name_match.group(0)).strip()
-                    price_info = {
-                        "display_price": 0.0,
-                        "display_currency": "TON",
-                        "ton_price": 0.0,
-                        "usd_price": extract_usd_from_text(text),
-                    }
-                else:
-                    name_text = await cells.nth(0).inner_text()
-                    price_text = await cells.nth(1).inner_text()
+                    continue
 
-                    if "+888" not in name_text:
-                        continue
-
-                    name_match = re.search(r"\+888[\s\d]{4,20}", name_text)
-                    if not name_match:
-                        continue
-
-                    name = re.sub(r"\s+", " ", name_match.group(0)).strip()
-                    price_info = parse_number_price_cell(price_text)
+                name_text = await cells.nth(0).inner_text()
+                price_text = await cells.nth(1).inner_text()
             except Exception:
                 continue
 
+            if "+888" not in name_text:
+                continue
+
+            name_match = re.search(r"\+888[\s\d]{4,20}", name_text)
+            if not name_match:
+                continue
+
+            name = re.sub(r"\s+", " ", name_match.group(0)).strip()
+
+            price_info = parse_number_price_cell(price_text)
             digits = re.sub(r"\D", "", name)
             tail = digits[3:] if digits.startswith("888") else digits
 

@@ -246,21 +246,6 @@ def normalize_username(value: str) -> str:
     return text
 
 
-def normalize_888_number(value: str) -> str:
-    digits = re.sub(r"\D", "", str(value))
-    if not digits.startswith("888"):
-        return str(value).strip()
-
-    tail = digits[3:]
-    if len(tail) == 8:
-        return f"+888 {tail[:4]} {tail[4:]}"
-    if len(tail) == 7:
-        return f"+888 {tail[:3]} {tail[3:]}"
-    if len(tail) == 4:
-        return f"+888 {tail[0]} {tail[1:]}"
-    return f"+{digits}"
-
-
 def extract_primary_price_from_dict(raw: dict) -> float:
     direct_candidates = [
         raw.get("price"),

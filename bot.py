@@ -105,12 +105,7 @@ USERNAME_QUERY_DIGIT_CHARS = ["6", "8", "9", "0", "1", "2", "3", "4", "5", "7"]
 def build_promo_reply_markup():
     return {
         "inline_keyboard": [
-            [
-                {
-                    "text": PROMO_BUTTON_TEXT,
-                    "url": PROMO_BUTTON_URL,
-                }
-            ]
+            [{"text": PROMO_BUTTON_TEXT, "url": PROMO_BUTTON_URL}]
         ]
     }
 
@@ -149,7 +144,7 @@ def sort_items(items):
             x["ton_price"] <= 0,
             price_or_inf(x),
             x["name"].lower(),
-        )
+        ),
     )
 
 
@@ -288,7 +283,6 @@ def parse_candidates_from_json_payload(payload, expected_length: int):
     def add_candidate(name: str, price: float, raw_obj):
         if not name or price <= 0:
             return
-
         key = name.lower()
         old = candidates.get(key)
         item = {
@@ -362,10 +356,8 @@ async def fetch_ton_usd_rate():
 def add_or_replace_query(base_url: str, query_value: str) -> str:
     if not base_url:
         return ""
-
     if "query=" in base_url:
         return re.sub(r"query=[^&]*", f"query={quote(query_value)}", base_url)
-
     sep = "&" if "?" in base_url else "?"
     return f"{base_url}{sep}query={quote(query_value)}"
 
@@ -445,11 +437,9 @@ async def fetch_query_result(browser, url: str, expected_length: int):
                 ctype = (response.headers.get("content-type") or "").lower()
                 if "application/json" not in ctype:
                     continue
-
                 body = await response.text()
                 if not body or body[0] not in "{[":
                     continue
-
                 payload = json.loads(body)
                 json_candidates.extend(parse_candidates_from_json_payload(payload, expected_length))
             except Exception:
@@ -517,11 +507,7 @@ async def build_username_section(browser, base_url: str, length_value: int):
         selected.append(chosen)
 
     if extra_count > 0 and base_url:
-        filler_queries = [
-            "", "a", "e", "i", "o", "u",
-            "1", "6", "8", "9", "0",
-            "aa", "11", "66", "88",
-        ]
+        filler_queries = ["", "a", "e", "i", "o", "u", "1", "6", "8", "9", "0", "aa", "11", "66", "88"]
         for q in filler_queries:
             if len(selected) >= len(rules) + extra_count:
                 break
@@ -544,13 +530,8 @@ async def build_username_section(browser, base_url: str, length_value: int):
     return selected[: len(rules) + extra_count]
 
 
-async def wait_numbers_rows(page, timeout_ms=20000):
-    selectors = [
-        "table tbody tr",
-        "tbody tr",
-        "tr",
-    ]
-
+async def wait_numbers_rows(page, timeout_ms=25000):
+    selectors = ["table tbody tr", "tbody tr", "tr"]
     for sel in selectors:
         try:
             await page.wait_for_selector(sel, timeout=timeout_ms)
@@ -714,7 +695,6 @@ def username_add_by_rule(item):
 
 def build_usernames_message(section_5, section_6, section_7, ton_usd_rate):
     now_str = datetime.now(TZ).strftime("%Y-%m-%d %H:%M:%S")
-
     lines = []
 
     lines.append("【5位用户名】")
@@ -760,9 +740,9 @@ def build_numbers_message(number_floor, ton_usd_rate):
     item = number_floor.get("has4")
     if item:
         if item.get("display_currency") == "USDT" and item.get("display_price", 0.0) > 0:
-            out_price = item["display_price"]
+            out_price = item["display_price"] + NUMBER_ADD_USD["has4"]
         else:
-            out_price = usd_after_add(item["ton_price"], ton_usd_rate, NUMBER_ADD_USD["has4"])
+            out_price = item["ton_price"] * ton_usd_rate + NUMBER_ADD_USD["has4"]
         lines.append(f"【含4正常】 {item['name']} - ${display_price_int(out_price)}")
     else:
         lines.append("【含4正常】 暂无数据")
@@ -770,9 +750,9 @@ def build_numbers_message(number_floor, ton_usd_rate):
     item = number_floor.get("no4")
     if item:
         if item.get("display_currency") == "USDT" and item.get("display_price", 0.0) > 0:
-            out_price = item["display_price"]
+            out_price = item["display_price"] + NUMBER_ADD_USD["no4"]
         else:
-            out_price = usd_after_add(item["ton_price"], ton_usd_rate, NUMBER_ADD_USD["no4"])
+            out_price = item["ton_price"] * ton_usd_rate + NUMBER_ADD_USD["no4"]
         lines.append(f"【无4正常】 {item['name']} - ${display_price_int(out_price)}")
     else:
         lines.append("【无4正常】 暂无数据")

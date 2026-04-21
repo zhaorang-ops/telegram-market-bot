@@ -35,7 +35,6 @@ USERNAME_ADD_USD = {
     7: 50.0,
 }
 
-# 只有匿名号主价格是 TON 时，才额外加这个
 NUMBER_ADD_USD = {
     "has4": 50.0,
     "no4": 50.0,
@@ -247,61 +246,19 @@ def normalize_username(value: str) -> str:
     return text
 
 
-def looks_like_888_number(value: str) -> bool:
-    if not isinstance(value, str):
-        return False
-    text = value.strip()
-    digits = re.sub(r"\D", "", text)
-    return digits.startswith("888") and len(digits) >= 7
-
-
 def normalize_888_number(value: str) -> str:
     digits = re.sub(r"\D", "", str(value))
     if not digits.startswith("888"):
         return str(value).strip()
 
     tail = digits[3:]
-    if len(tail) == 4:
-        return f"+888 {tail[0]} {tail[1:]}"
     if len(tail) == 8:
         return f"+888 {tail[:4]} {tail[4:]}"
+    if len(tail) == 7:
+        return f"+888 {tail[:3]} {tail[3:]}"
+    if len(tail) == 4:
+        return f"+888 {tail[0]} {tail[1:]}"
     return f"+{digits}"
-
-
-def extract_ton_price_from_dict(raw: dict) -> float:
-    ton_keys = [
-        "price_ton",
-        "ton_price",
-        "amount_ton",
-        "floor_price_ton",
-        "min_bid_ton",
-        "max_bid_ton",
-    ]
-
-    for key in ton_keys:
-        if key in raw:
-            num = to_float(raw.get(key), 0.0)
-            if num > 0:
-                return num
-
-    scored = []
-    for key, value in deep_walk(raw):
-        key_l = str(key).lower()
-        if "ton" not in key_l:
-            continue
-        if "usd" in key_l or "usdt" in key_l:
-            continue
-        num = to_float(value, 0.0)
-        if num > 0:
-            if num > 1_000_000:
-                num = num / 1_000_000_000
-            scored.append((key_l, num))
-
-    if not scored:
-        return 0.0
-
-    scored.sort(key=lambda x: x[1])
-    return scored[0][1]
 
 
 def extract_primary_price_from_dict(raw: dict) -> float:
@@ -310,6 +267,7 @@ def extract_primary_price_from_dict(raw: dict) -> float:
         raw.get("full_price"),
         raw.get("min_bid"),
         raw.get("amount"),
+        raw.get("floor_price"),
     ]
 
     for v in direct_candidates:
@@ -337,58 +295,6 @@ def extract_primary_price_from_dict(raw: dict) -> float:
 
     scored.sort(key=lambda x: x[1])
     return scored[0][1]
-
-
-def extract_usd_from_dict(raw: dict) -> float:
-    for key, value in deep_walk(raw):
-        key_l = str(key).lower()
-        if "usd" not in key_l:
-            continue
-        num = to_float(value, 0.0)
-        if num > 0:
-            return num
-    return 0.0
-
-
-def has_usdt_hint(raw: dict) -> bool:
-    for key, value in deep_walk(raw):
-        key_l = str(key).lower()
-        val_l = str(value).lower()
-        if "usdt" in key_l or "usd" in key_l:
-            return True
-        if "usdt" in val_l:
-            return True
-    return False
-
-
-def parse_number_price_info_from_dict(raw: dict):
-    ton_price = extract_ton_price_from_dict(raw)
-    primary_price = extract_primary_price_from_dict(raw)
-    usd_price = extract_usd_from_dict(raw)
-
-    display_currency = "TON"
-    display_price = 0.0
-
-    if primary_price > 0 and ton_price > 0 and abs(primary_price - ton_price) > 1:
-        display_currency = "USDT"
-        display_price = primary_price
-    elif primary_price > 0 and has_usdt_hint(raw):
-        display_currency = "USDT"
-        display_price = primary_price
-    elif ton_price > 0:
-        display_currency = "TON"
-        display_price = ton_price
-    elif primary_price > 0:
-        display_currency = "TON"
-        ton_price = primary_price
-        display_price = primary_price
-
-    return {
-        "ton_price": ton_price,
-        "usd_price": usd_price,
-        "display_price": display_price,
-        "display_currency": display_currency,
-    }
 
 
 def parse_candidates_from_json_payload(payload, expected_length: int):
@@ -437,92 +343,11 @@ def parse_candidates_from_json_payload(payload, expected_length: int):
             if not names:
                 continue
 
-            price = extract_primary_price_from_dict(obj) or extract_ton_price_from_dict(obj)
+            price = extract_primary_price_from_dict(obj)
             for name in names:
                 add_candidate(name, price, obj)
 
     return sort_items(list(candidates.values()))
-
-
-def parse_number_candidates_from_json_payload(payload):
-    candidates = {}
-
-    def add_candidate(name: str, raw_obj):
-        price_info = parse_number_price_info_from_dict(raw_obj)
-        ton_price = price_info["ton_price"]
-        display_price = price_info["display_price"]
-
-        if not name or (ton_price <= 0 and display_price <= 0):
-            return
-
-        restricted = False
-        for k, v in deep_walk(raw_obj):
-            key_l = str(k).lower()
-            if "restricted" in key_l:
-                restricted = str(v).strip().lower() in {"true", "1", "yes", "restricted"}
-                break
-            if key_l == "status" and isinstance(v, str) and "restricted" in v.lower():
-                restricted = True
-                break
-
-        key = name.lower()
-        old = candidates.get(key)
-        item = {
-            "name": name,
-            "ton_price": ton_price,
-            "usd_price": price_info["usd_price"],
-            "display_price": price_info["display_price"],
-            "display_currency": price_info["display_currency"],
-            "is_restricted": restricted,
-            "raw": raw_obj,
-        }
-
-        if old is None:
-            candidates[key] = item
-            return
-
-        old_comp = old["display_price"] if old["display_price"] > 0 else old["ton_price"]
-        new_comp = item["display_price"] if item["display_price"] > 0 else item["ton_price"]
-        if 0 < new_comp < old_comp:
-            candidates[key] = item
-
-    roots = payload if isinstance(payload, list) else [payload]
-
-    for root in roots:
-        if not isinstance(root, dict):
-            continue
-
-        maybe_objects = [root]
-        for _, v in deep_walk(root):
-            if isinstance(v, dict):
-                maybe_objects.append(v)
-
-        for obj in maybe_objects:
-            names = []
-
-            for _, v in obj.items():
-                if isinstance(v, str) and looks_like_888_number(v):
-                    names.append(normalize_888_number(v))
-
-            if not names:
-                for _, v in deep_walk(obj):
-                    if isinstance(v, str) and looks_like_888_number(v):
-                        names.append(normalize_888_number(v))
-
-            if not names:
-                continue
-
-            for name in names:
-                add_candidate(name, obj)
-
-    return sorted(
-        candidates.values(),
-        key=lambda x: (
-            (x["display_price"] <= 0 and x["ton_price"] <= 0),
-            x["display_price"] if x["display_price"] > 0 else x["ton_price"],
-            x["name"],
-        )
-    )
 
 
 async def fetch_ton_usd_rate():
@@ -626,7 +451,8 @@ async def fetch_query_result(browser, url: str, expected_length: int):
     page.on("response", on_response)
 
     try:
-        await page.goto(url, wait_until="domcontentloaded", timeout=30000)
+        await page.
+        goto(url, wait_until="domcontentloaded", timeout=30000)
         await page.wait_for_timeout(3000)
 
         json_candidates = []
@@ -640,7 +466,7 @@ async def fetch_query_result(browser, url: str, expected_length: int):
                 if not body or body[0] not in "{[":
                     continue
 
-                    payload = json.loads(body)
+                payload = json.loads(body)
                 json_candidates.extend(parse_candidates_from_json_payload(payload, expected_length))
             except Exception:
                 continue
@@ -653,8 +479,7 @@ async def fetch_query_result(browser, url: str, expected_length: int):
         except PlaywrightTimeoutError:
             pass
 
-        result = await extract_first_row_from_page(page, expected_length)
-        return result
+        return await extract_first_row_from_page(page, expected_length)
     finally:
         await context.close()
 
@@ -735,6 +560,22 @@ async def build_username_section(browser, base_url: str, length_value: int):
     return selected[: len(rules) + extra_count]
 
 
+async def wait_numbers_rows(page, timeout_ms=20000):
+    selectors = [
+        "table tbody tr",
+        "tbody tr",
+        "tr",
+    ]
+
+    for sel in selectors:
+        try:
+            await page.wait_for_selector(sel, timeout=timeout_ms)
+            return True
+        except Exception:
+            pass
+    return False
+
+
 def parse_number_price_cell(price_text: str):
     lines = [x.strip() for x in str(price_text).splitlines() if x.strip()]
 
@@ -792,54 +633,20 @@ async def fetch_numbers_floor(browser, base_url: str):
     context = await browser.new_context()
     page = await context.new_page()
 
-    responses = []
-
-    def on_response(response):
-        responses.append(response)
-
-    page.on("response", on_response)
-
     try:
-        await page.goto(base_url, wait_until="domcontentloaded", timeout=30000)
+        await page.goto(base_url, wait_until="domcontentloaded", timeout=60000)
+
+        ready = await wait_numbers_rows(page, timeout_ms=25000)
+        if not ready:
+            return {"has4": None, "no4": None}
+
         await page.wait_for_timeout(3000)
-
-        json_candidates = []
-        for response in responses[-20:]:
-            try:
-                ctype = (response.headers.get("content-type") or "").lower()
-                if "application/json" not in ctype:
-                    continue
-
-                body = await response.text()
-                if not body or body[0] not in "{[":
-                    continue
-
-                payload = json.loads(body)
-                json_candidates.extend(parse_number_candidates_from_json_payload(payload))
-            except Exception:
-                continue
-
-        if json_candidates:
-            valid = [x for x in json_candidates if not x["is_restricted"]]
-
-            def has4(x):
-                digits = re.sub(r"\D", "", x["name"])
-                tail = digits[3:] if digits.startswith("888") else digits
-                return "4" in tail
-
-            def no4(x):
-                digits = re.sub(r"\D", "", x["name"])
-                tail = digits[3:] if digits.startswith("888") else digits
-                return "4" not in tail
-
-            has4_item = next((x for x in valid if has4(x)), None)
-            no4_item = next((x for x in valid if no4(x)), None)
-
-            if has4_item or no4_item:
-                return {"has4": has4_item, "no4": no4_item}
 
         rows = page.locator("table tbody tr")
         count = await rows.count()
+        if count == 0:
+            rows = page.locator("tbody tr")
+            count = await rows.count()
         if count == 0:
             rows = page.locator("tr")
             count = await rows.count()
@@ -849,14 +656,20 @@ async def fetch_numbers_floor(browser, base_url: str):
 
         for i in range(count):
             row = rows.nth(i)
+
             try:
                 cells = row.locator("td")
                 cell_count = await cells.count()
-                if cell_count < 2:
-                    continue
+            except Exception:
+                continue
 
+            if cell_count < 2:
+                continue
+
+            try:
                 name_text = await cells.nth(0).inner_text()
                 price_text = await cells.nth(1).inner_text()
+                row_text = await row.inner_text()
             except Exception:
                 continue
 
@@ -868,8 +681,11 @@ async def fetch_numbers_floor(browser, base_url: str):
                 continue
 
             name = re.sub(r"\s+", " ", name_match.group(0)).strip()
-
             price_info = parse_number_price_cell(price_text)
+
+            if price_info["display_price"] <= 0 and price_info["ton_price"] <= 0:
+                continue
+
             digits = re.sub(r"\D", "", name)
             tail = digits[3:] if digits.startswith("888") else digits
 
@@ -879,10 +695,10 @@ async def fetch_numbers_floor(browser, base_url: str):
                 "usd_price": price_info["usd_price"],
                 "display_price": price_info["display_price"],
                 "display_currency": price_info["display_currency"],
-                "is_restricted": False,
+                "is_restricted": "restricted" in row_text.lower(),
             }
 
-            if item["display_price"] <= 0 and item["ton_price"] <= 0:
+            if item["is_restricted"]:
                 continue
 
             if "4" in tail and has4_item is None:
@@ -1037,7 +853,7 @@ async def edit_existing_message(chat_id: str, message_id, text: str, label: str,
         return False
 
     payload = {
-        "chat_id": chat_id,
+    "chat_id": chat_id,
         "message_id": message_id,
         "text": text,
         "disable_web_page_preview": True,
@@ -1134,5 +950,5 @@ async def main():
     )
 
 
-if __name__ == "__main__":
+if name == "__main__":
     asyncio.run(main())

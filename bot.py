@@ -20,6 +20,17 @@ NUMBER_ADD_USD = {
     "no4": 50.0,
 }
 
+PRICE_KEYS_PRIORITY = {
+    "min_bid": 100,
+    "max_bid": 95,
+    "full_price": 92,
+    "price": 90,
+    "price_ton": 89,
+    "ton_price": 88,
+    "floor_price": 86,
+    "amount": 84,
+}
+
 
 def to_float(value, default=0.0):
     if value is None:
@@ -48,12 +59,10 @@ def to_float(value, default=0.0):
         return default
 
 
-
 def display_price_int(value: float) -> int:
     if value <= 0:
         return 0
     return int(value) + 1
-
 
 
 def deep_walk(obj):
@@ -66,14 +75,12 @@ def deep_walk(obj):
             yield from deep_walk(item)
 
 
-
 def looks_like_888_number(value: str) -> bool:
     if not isinstance(value, str):
         return False
     text = value.strip()
     digits = re.sub(r"\D", "", text)
     return digits.startswith("888") and len(digits) >= 7
-
 
 
 def normalize_888_number(value: str) -> str:
@@ -89,70 +96,126 @@ def normalize_888_number(value: str) -> str:
     return f"+{digits}"
 
 
+def has_usd_marker(text: str) -> bool:
+    if not text:
+        return False
+    s = str(text)
+    return bool(re.search(r"(?:\$|\bUSD\b|\bUSDT\b)", s, re.I))
 
-def extract_ton_from_dict(raw: dict) -> float:
-    direct_candidates = [
-        raw.get("min_bid"),
-        raw.get("max_bid"),
-        raw.get("full_price"),
-        raw.get("price"),
-        raw.get("price_ton"),
-        raw.get("ton_price"),
-        raw.get("floor_price"),
-        raw.get("amount"),
-    ]
 
-    for v in direct_candidates:
-        num = to_float(v, 0.0)
-        if num > 0:
-            if num > 1_000_000:
-                num = num / 1_000_000_000
-            return num
+def has_ton_marker(text: str) -> bool:
+    if not text:
+        return False
+    s = str(text)
+    return bool(re.search(r"\bTON\b", s, re.I))
 
-    scored = []
+
+def normalize_ton_amount(num: float) -> float:
+    if num > 1_000_000:
+        return num / 1_000_000_000
+    return num
+
+
+def infer_object_currency(raw: dict):
+    hint_keys = {
+        "currency",
+        "quote_currency",
+        "quotecurrency",
+        "unit",
+        "price_unit",
+        "asset",
+        "asset_type",
+        "quote_asset",
+        "quote_token",
+        "payment_token",
+        "token",
+        "coin",
+        "denom",
+        "symbol",
+    }
+
     for key, value in deep_walk(raw):
-        key_l = str(key).lower()
-        if not any(x in key_l for x in ["price", "bid", "ton", "amount"]):
-            continue
-        if "usd" in key_l or "usdt" in key_l:
+        key_l = str(key).lower().replace("-", "_")
+        if key_l not in hint_keys and not any(h in key_l for h in ["currency", "unit", "token", "asset"]):
             continue
 
+        val_s = str(value).strip().lower()
+        if "usdt" in val_s or val_s == "usd" or val_s.endswith("usd"):
+            return "usd"
+        if val_s == "ton" or "the open network" in val_s:
+            return "ton"
+
+    return None
+
+
+def infer_currency_from_key_value(key, value, default_currency=None):
+    key_l = str(key).lower()
+    value_s = str(value)
+
+    if "usdt" in key_l or "usd" in key_l or has_usd_marker(value_s):
+        return "usd"
+
+    if "ton" in key_l or has_ton_marker(value_s):
+        return "ton"
+
+    return default_currency
+
+
+def extract_prices_from_dict(raw: dict):
+    ton_candidates = []
+    usd_candidates = []
+    default_currency = infer_object_currency(raw)
+
+    def add_candidate(key, value, base_score):
         num = to_float(value, 0.0)
         if num <= 0:
-            continue
+            return
 
-        if num > 1_000_000:
-            num = num / 1_000_000_000
+        currency = infer_currency_from_key_value(key, value, default_currency)
+        key_l = str(key).lower()
 
-        score = 0
-        if key_l == "min_bid":
-            score += 100
-        if key_l == "max_bid":
-            score += 95
-        if key_l == "price":
-            score += 90
-        if "ton" in key_l:
-            score += 80
-        scored.append((score, num))
+        if currency == "usd":
+            usd_candidates.append((base_score, num))
+            return
 
-    if not scored:
-        return 0.0
+        if currency == "ton":
+            ton_candidates.append((base_score, normalize_ton_amount(num)))
+            return
 
-    scored.sort(key=lambda x: (-x[0], x[1]))
-    return scored[0][1]
+        if key_l in {"min_bid", "price_ton", "ton_price"}:
+            ton_candidates.append((base_score, normalize_ton_amount(num)))
 
+    for key in [
+        "min_bid",
+        "max_bid",
+        "full_price",
+        "price",
+        "price_ton",
+        "ton_price",
+        "floor_price",
+        "amount",
+    ]:
+        if key in raw:
+            add_candidate(key, raw.get(key), PRICE_KEYS_PRIORITY.get(key, 50))
 
-
-def extract_usd_from_dict(raw: dict) -> float:
     for key, value in deep_walk(raw):
         key_l = str(key).lower()
-        if "usd" not in key_l and "usdt" not in key_l:
+        if not any(x in key_l for x in ["price", "bid", "ton", "usd", "usdt", "amount"]):
             continue
-        num = to_float(value, 0.0)
-        if num > 0:
-            return num
-    return 0.0
+        add_candidate(key, value, PRICE_KEYS_PRIORITY.get(key_l, 40))
 
+    ton_price = 0.0
+    usd_price = 0.0
+
+    if ton_candidates:
+        ton_candidates.sort(key=lambda x: (-x[0], x[1]))
+        ton_price = ton_candidates[0][1]
+
+    if usd_candidates:
+        usd_candidates.sort(key=lambda x: (-x[0], x[1]))
+        usd_price = usd_candidates[0][1]
+
+    return ton_price, usd_price
 
 
 def extract_usd_from_text(text: str) -> float:
@@ -174,10 +237,8 @@ def extract_usd_from_text(text: str) -> float:
     return 0.0
 
 
-
 def has_any_price(item: dict) -> bool:
     return item.get("usd_price", 0.0) > 0 or item.get("ton_price", 0.0) > 0
-
 
 
 def build_display_usd(item: dict, ton_usd_rate: float, add_usd: float) -> float:
@@ -192,22 +253,38 @@ def build_display_usd(item: dict, ton_usd_rate: float, add_usd: float) -> float:
     return 0.0
 
 
+def build_price_debug_text(item: dict, ton_usd_rate: float, add_usd: float) -> str:
+    base_usd = item.get("usd_price", 0.0)
+    ton_price = item.get("ton_price", 0.0)
+
+    if base_usd > 0:
+        final_usd = build_display_usd(item, ton_usd_rate, add_usd)
+        return f"原始USDT/USD: {base_usd:g} -> +{int(add_usd)} = ${display_price_int(final_usd)}"
+
+    if ton_price > 0 and ton_usd_rate > 0:
+        final_usd = build_display_usd(item, ton_usd_rate, add_usd)
+        return f"原始TON: {ton_price:g} -> ×{ton_usd_rate:.6f} + {int(add_usd)} = ${display_price_int(final_usd)}"
+
+    if ton_price > 0:
+        return f"原始TON: {ton_price:g} -> 汇率获取失败"
+
+    return "暂无有效价格"
+
 
 def candidate_sort_key(item: dict, ton_usd_rate: float):
     display_usd = build_display_usd(item, ton_usd_rate, 0.0)
     if display_usd > 0:
         return (0, display_usd, item["name"])
 
-    ton_price = item.get("ton_price", 0.0)
-    if ton_price > 0:
-        return (1, ton_price, item["name"])
-
     usd_price = item.get("usd_price", 0.0)
     if usd_price > 0:
-        return (2, usd_price, item["name"])
+        return (1, usd_price, item["name"])
+
+    ton_price = item.get("ton_price", 0.0)
+    if ton_price > 0:
+        return (2, ton_price, item["name"])
 
     return (9, 10**18, item["name"])
-
 
 
 def parse_number_candidates_from_json_payload(payload, ton_usd_rate: float):
@@ -243,9 +320,7 @@ def parse_number_candidates_from_json_payload(payload, ton_usd_rate: float):
             candidates[key] = item
             return
 
-        old_key = candidate_sort_key(old, ton_usd_rate)
-        new_key = candidate_sort_key(item, ton_usd_rate)
-        if new_key < old_key:
+        if candidate_sort_key(item, ton_usd_rate) < candidate_sort_key(old, ton_usd_rate):
             candidates[key] = item
 
     roots = payload if isinstance(payload, list) else [payload]
@@ -274,9 +349,7 @@ def parse_number_candidates_from_json_payload(payload, ton_usd_rate: float):
             if not names:
                 continue
 
-            ton_price = extract_ton_from_dict(obj)
-            usd_price = extract_usd_from_dict(obj)
-
+            ton_price, usd_price = extract_prices_from_dict(obj)
             for name in names:
                 add_candidate(name, ton_price, usd_price, obj)
 
@@ -381,17 +454,19 @@ async def fetch_numbers_floor(browser, base_url: str, ton_usd_rate: float):
                 continue
 
             name = re.sub(r"\s+", " ", num_match.group(0)).strip()
+            usd_price = extract_usd_from_text(text)
+            ton_price = 0.0
 
             price_match = re.search(r"▽\s*([\d,]+(?:\.\d+)?)", text)
-            ton_price = to_float(price_match.group(1), 0.0) if price_match else 0.0
-            usd_price = extract_usd_from_text(text)
+            if price_match and not (usd_price > 0 and not has_ton_marker(text)):
+                ton_price = to_float(price_match.group(1), 0.0)
 
-            if ton_price <= 0:
+            if ton_price <= 0 and usd_price <= 0 and has_ton_marker(text):
                 text_wo_name = text.replace(name, " ")
                 ton_candidates = re.findall(r"(?<!\$)\b\d+(?:,\d{3})*(?:\.\d+)?\b", text_wo_name)
                 for raw in ton_candidates:
                     val = to_float(raw, 0.0)
-                    if val > 100:
+                    if val > 0:
                         ton_price = val
                         break
 
@@ -421,16 +496,16 @@ async def fetch_numbers_floor(browser, base_url: str, ton_usd_rate: float):
         await context.close()
 
 
-
 def build_numbers_message(number_floor, ton_usd_rate):
     now_str = datetime.now(TZ).strftime("%Y-%m-%d %H:%M:%S")
-    lines = ["📱【官方888号】地板价（匿名号测试版）"]
+    lines = ["📱【官方888号】地板价（匿名号测试版 v2）"]
 
     item = number_floor.get("has4")
     if item:
         usd_val = build_display_usd(item, ton_usd_rate, NUMBER_ADD_USD["has4"])
         if usd_val > 0:
             lines.append(f"【含4正常】 {item['name']} - ${display_price_int(usd_val)}")
+            lines.append(f"    {build_price_debug_text(item, ton_usd_rate, NUMBER_ADD_USD['has4'])}")
         else:
             lines.append(f"【含4正常】 {item['name']} - 暂无有效价格")
     else:
@@ -441,13 +516,14 @@ def build_numbers_message(number_floor, ton_usd_rate):
         usd_val = build_display_usd(item, ton_usd_rate, NUMBER_ADD_USD["no4"])
         if usd_val > 0:
             lines.append(f"【无4正常】 {item['name']} - ${display_price_int(usd_val)}")
+            lines.append(f"    {build_price_debug_text(item, ton_usd_rate, NUMBER_ADD_USD['no4'])}")
         else:
             lines.append(f"【无4正常】 {item['name']} - 暂无有效价格")
     else:
         lines.append("【无4正常】 暂无数据")
 
     lines.append("")
-    lines.append("规则：USDT 直接 +50；TON 按汇率换算后 +50")
+    lines.append("规则：USDT/USD 直接 +50；TON 按汇率换算后 +50")
     lines.append(f"当前 TON 汇率：{ton_usd_rate:.6f} USD" if ton_usd_rate > 0 else "当前 TON 汇率：获取失败")
     lines.append(f"更新时间：{now_str}")
     return "\n".join(lines)
@@ -543,7 +619,7 @@ async def main():
         NUMBERS_CHAT_ID,
         NUMBERS_MESSAGE_ID,
         numbers_text,
-        "NUMBERS_MESSAGE_ID_TEST",
+        "NUMBERS_MESSAGE_ID_TEST_V2",
     )
 
 

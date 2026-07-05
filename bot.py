@@ -101,13 +101,6 @@ USERNAME_EXTRA_COUNT = {
 USERNAME_QUERY_ALPHA_CHARS = "abcdefghijklmnopqrstuvwxyz"
 USERNAME_QUERY_DIGIT_CHARS = ["6", "8", "9", "0", "1", "2", "3", "4", "5", "7"]
 
-MAX_CONCURRENT_PAGES = int(os.environ.get("MAX_CONCURRENT_PAGES", "10") or "10")
-PAGE_GOTO_TIMEOUT_MS = int(os.environ.get("PAGE_GOTO_TIMEOUT_MS", "8000") or "8000")
-PAGE_SETTLE_WAIT_MS = int(os.environ.get("PAGE_SETTLE_WAIT_MS", "1000") or "1000")
-TABLE_WAIT_TIMEOUT_MS = int(os.environ.get("TABLE_WAIT_TIMEOUT_MS", "2500") or "2500")
-
-BLOCKED_RESOURCE_TYPES = {"image", "media", "font", "stylesheet"}
-
 
 def build_promo_reply_markup():
     return {
@@ -569,19 +562,6 @@ def add_or_replace_query(base_url: str, query_value: str) -> str:
     return f"{base_url}{sep}query={quote(query_value)}"
 
 
-async def create_market_context(browser):
-    context = await browser.new_context()
-
-    async def block_unneeded_resources(route):
-        if route.request.resource_type in BLOCKED_RESOURCE_TYPES:
-            await route.abort()
-            return
-        await route.continue_()
-
-    await context.route("**/*", block_unneeded_resources)
-    return context
-
-
 async def extract_first_row_from_page(page, expected_length: int):
     row_locator = page.locator("table tbody tr")
     count = await row_locator.count()
@@ -636,52 +616,52 @@ async def extract_first_row_from_page(page, expected_length: int):
     return None
 
 
-async def fetch_query_result(context, url: str, expected_length: int, semaphore: asyncio.Semaphore):
-    async with semaphore:
-        page = await context.new_page()
+async def fetch_query_result(browser, url: str, expected_length: int):
+    context = await browser.new_context()
+    page = await context.new_page()
 
-        responses = []
+    responses = []
 
-        def on_response(response):
-            responses.append(response)
+    def on_response(response):
+        responses.append(response)
 
-        page.on("response", on_response)
+    page.on("response", on_response)
 
-        try:
-            await page.goto(url, wait_until="domcontentloaded", timeout=PAGE_GOTO_TIMEOUT_MS)
-            await page.wait_for_timeout(PAGE_SETTLE_WAIT_MS)
+    try:
+        await page.goto(url, wait_until="domcontentloaded", timeout=30000)
+        await page.wait_for_timeout(3000)
 
-            json_candidates = []
-            for response in responses[-20:]:
-                try:
-                    ctype = (response.headers.get("content-type") or "").lower()
-                    if "application/json" not in ctype:
-                        continue
-
-                    body = await response.text()
-                    if not body or body[0] not in "{[":
-                        continue
-
-                    payload = json.loads(body)
-                    json_candidates.extend(parse_candidates_from_json_payload(payload, expected_length))
-                except Exception:
+        json_candidates = []
+        for response in responses[-20:]:
+            try:
+                ctype = (response.headers.get("content-type") or "").lower()
+                if "application/json" not in ctype:
                     continue
 
-            if json_candidates:
-                return json_candidates[0]
+                body = await response.text()
+                if not body or body[0] not in "{[":
+                    continue
 
-            try:
-                await page.wait_for_selector("tr", timeout=TABLE_WAIT_TIMEOUT_MS)
-            except PlaywrightTimeoutError:
-                pass
+                payload = json.loads(body)
+                json_candidates.extend(parse_candidates_from_json_payload(payload, expected_length))
+            except Exception:
+                continue
 
-            result = await extract_first_row_from_page(page, expected_length)
-            return result
-        finally:
-            await page.close()
+        if json_candidates:
+            return json_candidates[0]
+
+        try:
+            await page.wait_for_selector("tr", timeout=10000)
+        except PlaywrightTimeoutError:
+            pass
+
+        result = await extract_first_row_from_page(page, expected_length)
+        return result
+    finally:
+        await context.close()
 
 
-async def fetch_best_match_by_query(context, base_url: str, length_value: int, rule_name: str, run_len, kind: str, semaphore: asyncio.Semaphore):
+async def fetch_best_match_by_query(browser, base_url: str, length_value: int, rule_name: str, run_len, kind: str):
     if not base_url:
         return None
 
@@ -694,18 +674,14 @@ async def fetch_best_match_by_query(context, base_url: str, length_value: int, r
     else:
         return None
 
-    async def fetch_one(q):
+    for q in queries:
         url = add_or_replace_query(base_url, q)
         try:
-            result = await fetch_query_result(context, url, length_value, semaphore)
+            result = await fetch_query_result(browser, url, length_value)
         except Exception as e:
             print(f"DEBUG QUERY FAIL length={length_value} rule={rule_name} query={q} error={repr(e)}")
-            return None
-        return result
+            result = None
 
-    results = await asyncio.gather(*(fetch_one(q) for q in queries))
-
-    for q, result in zip(queries, results):
         if result and rule_match(username_clean(result["name"]), rule_name, run_len, kind):
             result["matched_rule"] = rule_name
             print(f"DEBUG QUERY HIT length={length_value} rule={rule_name} query={q} name={result['name']}")
@@ -718,7 +694,7 @@ async def fetch_all_username_items():
     return []
 
 
-async def build_username_section(context, base_url: str, length_value: int, semaphore: asyncio.Semaphore):
+async def build_username_section(browser, base_url: str, length_value: int):
     rules = USERNAME_RULES[length_value]
     extra_count = USERNAME_EXTRA_COUNT[length_value]
 
@@ -727,7 +703,7 @@ async def build_username_section(context, base_url: str, length_value: int, sema
     last_price = None
 
     for rule_name, run_len, kind in rules:
-        chosen = await fetch_best_match_by_query(context, base_url, length_value, rule_name, run_len, kind, semaphore)
+        chosen = await fetch_best_match_by_query(browser, base_url, length_value, rule_name, run_len, kind)
 
         if chosen and chosen["name"].lower() in used:
             chosen = None
@@ -747,18 +723,15 @@ async def build_username_section(context, base_url: str, length_value: int, sema
             "1", "6", "8", "9", "0",
             "aa", "11", "66", "88",
         ]
-        async def fetch_filler(q):
-            url = add_or_replace_query(base_url, q)
-            try:
-                return await fetch_query_result(context, url, length_value, semaphore)
-            except Exception:
-                return None
-
-        filler_results = await asyncio.gather(*(fetch_filler(q) for q in filler_queries))
-
-        for result in filler_results:
+        for q in filler_queries:
             if len(selected) >= len(rules) + extra_count:
                 break
+
+            url = add_or_replace_query(base_url, q)
+            try:
+                result = await fetch_query_result(browser, url, length_value)
+            except Exception:
+                result = None
 
             if not result:
                 continue
@@ -772,143 +745,122 @@ async def build_username_section(context, base_url: str, length_value: int, sema
     return selected[: len(rules) + extra_count]
 
 
-async def safe_build_username_section(context, base_url: str, length_value: int, semaphore: asyncio.Semaphore):
-    try:
-        return await build_username_section(context, base_url, length_value, semaphore)
-    except Exception as e:
-        print(f"DEBUG SECTION FAIL length={length_value} error={repr(e)}")
-        return []
-
-
-async def fetch_numbers_floor(context, base_url: str, ton_usd_rate: float, semaphore: asyncio.Semaphore):
+async def fetch_numbers_floor(browser, base_url: str, ton_usd_rate: float):
     if not base_url:
         return {"has4": None, "no4": None}
 
-    async with semaphore:
-        page = await context.new_page()
+    context = await browser.new_context()
+    page = await context.new_page()
 
-        responses = []
+    responses = []
 
-        def on_response(response):
-            responses.append(response)
+    def on_response(response):
+        responses.append(response)
 
-        page.on("response", on_response)
+    page.on("response", on_response)
 
-        try:
-            await page.goto(base_url, wait_until="domcontentloaded", timeout=PAGE_GOTO_TIMEOUT_MS)
-            await page.wait_for_timeout(PAGE_SETTLE_WAIT_MS)
-
-            json_candidates = []
-            for response in responses[-30:]:
-                try:
-                    ctype = (response.headers.get("content-type") or "").lower()
-                    if "application/json" not in ctype:
-                        continue
-
-                    body = await response.text()
-                    if not body or body[0] not in "[{":
-                        continue
-
-                    payload = json.loads(body)
-                    json_candidates.extend(parse_number_candidates_from_json_payload(payload, ton_usd_rate))
-                except Exception:
-                    continue
-
-            def has4(x):
-                digits = re.sub(r"\D", "", x["name"])
-                tail = digits[3:] if digits.startswith("888") else digits
-                return "4" in tail
-
-            def no4(x):
-                digits = re.sub(r"\D", "", x["name"])
-                tail = digits[3:] if digits.startswith("888") else digits
-                return "4" not in tail
-
-            if json_candidates:
-                valid = [x for x in json_candidates if has_any_price(x) and not x["is_restricted"]]
-                has4_item = next((x for x in valid if has4(x)), None)
-                no4_item = next((x for x in valid if no4(x)), None)
-
-                if has4_item or no4_item:
-                    return {"has4": has4_item, "no4": no4_item}
-
-            try:
-                await page.wait_for_selector("tr", timeout=TABLE_WAIT_TIMEOUT_MS)
-            except PlaywrightTimeoutError:
-                pass
-
-            rows = page.locator("table tbody tr")
-            count = await rows.count()
-            if count == 0:
-                rows = page.locator("tr")
-                count = await rows.count()
-
-            has4_item = None
-            no4_item = None
-
-            for i in range(count):
-                row = rows.nth(i)
-                try:
-                    text = await row.inner_text()
-                except Exception:
-                    continue
-
-                if not text or "+888" not in text:
-                    continue
-
-                num_match = re.search(r"\+888[\s\d]{4,20}", text)
-                if not num_match:
-                    continue
-
-                name = re.sub(r"\s+", " ", num_match.group(0)).strip()
-                usd_price = extract_usd_from_text(text)
-                ton_price = 0.0
-
-                price_match = re.search(r"▽\s*([\d,]+(?:\.\d+)?)", text)
-                if price_match and not (usd_price > 0 and not has_ton_marker(text)):
-                    ton_price = to_float(price_match.group(1), 0.0)
-
-                if ton_price <= 0 and usd_price <= 0 and has_ton_marker(text):
-                    text_wo_name = text.replace(name, " ")
-                    ton_candidates = re.findall(r"(?<!\$)\d+(?:,\d{3})*(?:\.\d+)?", text_wo_name)
-                    for raw in ton_candidates:
-                        val = to_float(raw, 0.0)
-                        if val > 0:
-                            ton_price = val
-                            break
-
-                item = {
-                    "name": name,
-                    "ton_price": ton_price,
-                    "usd_price": usd_price,
-                    "is_restricted": "restricted" in text.lower(),
-                }
-
-                if item["is_restricted"] or not has_any_price(item):
-                    continue
-
-                digits = re.sub(r"\D", "", name)
-                tail = digits[3:] if digits.startswith("888") else digits
-
-                if "4" in tail and has4_item is None:
-                    has4_item = item
-                if "4" not in tail and no4_item is None:
-                    no4_item = item
-
-                if has4_item and no4_item:
-                    break
-
-            return {"has4": has4_item, "no4": no4_item}
-        finally:
-            await page.close()
-
-
-async def safe_fetch_numbers_floor(context, base_url: str, ton_usd_rate: float, semaphore: asyncio.Semaphore):
     try:
-        return await fetch_numbers_floor(context, base_url, ton_usd_rate, semaphore)
-    except Exception as e:
-        print(f"DEBUG NUMBERS FAIL error={repr(e)}")
-        return {"has4": None, "no4": None}
+        await page.goto(base_url, wait_until="domcontentloaded", timeout=30000)
+        await page.wait_for_timeout(3000)
+
+        json_candidates = []
+        for response in responses[-30:]:
+            try:
+                ctype = (response.headers.get("content-type") or "").lower()
+                if "application/json" not in ctype:
+                    continue
+
+                body = await response.text()
+                if not body or body[0] not in "[{":
+                    continue
+
+                payload = json.loads(body)
+                json_candidates.extend(parse_number_candidates_from_json_payload(payload, ton_usd_rate))
+            except Exception:
+                continue
+
+        def has4(x):
+            digits = re.sub(r"\D", "", x["name"])
+            tail = digits[3:] if digits.startswith("888") else digits
+            return "4" in tail
+
+        def no4(x):
+            digits = re.sub(r"\D", "", x["name"])
+            tail = digits[3:] if digits.startswith("888") else digits
+            return "4" not in tail
+
+        if json_candidates:
+            valid = [x for x in json_candidates if has_any_price(x) and not x["is_restricted"]]
+            has4_item = next((x for x in valid if has4(x)), None)
+            no4_item = next((x for x in valid if no4(x)), None)
+
+            if has4_item or no4_item:
+                return {"has4": has4_item, "no4": no4_item}
+
+        rows = page.locator("table tbody tr")
+        count = await rows.count()
+        if count == 0:
+            rows = page.locator("tr")
+            count = await rows.count()
+
+        has4_item = None
+        no4_item = None
+
+        for i in range(count):
+            row = rows.nth(i)
+            try:
+                text = await row.inner_text()
+            except Exception:
+                continue
+
+            if not text or "+888" not in text:
+                continue
+
+            num_match = re.search(r"\+888[\s\d]{4,20}", text)
+            if not num_match:
+                continue
+
+            name = re.sub(r"\s+", " ", num_match.group(0)).strip()
+            usd_price = extract_usd_from_text(text)
+            ton_price = 0.0
+
+            price_match = re.search(r"▽\s*([\d,]+(?:\.\d+)?)", text)
+            if price_match and not (usd_price > 0 and not has_ton_marker(text)):
+                ton_price = to_float(price_match.group(1), 0.0)
+
+            if ton_price <= 0 and usd_price <= 0 and has_ton_marker(text):
+                text_wo_name = text.replace(name, " ")
+                ton_candidates = re.findall(r"(?<!\$)\d+(?:,\d{3})*(?:\.\d+)?", text_wo_name)
+                for raw in ton_candidates:
+                    val = to_float(raw, 0.0)
+                    if val > 0:
+                        ton_price = val
+                        break
+
+            item = {
+                "name": name,
+                "ton_price": ton_price,
+                "usd_price": usd_price,
+                "is_restricted": "restricted" in text.lower(),
+            }
+
+            if item["is_restricted"] or not has_any_price(item):
+                continue
+
+            digits = re.sub(r"\D", "", name)
+            tail = digits[3:] if digits.startswith("888") else digits
+
+            if "4" in tail and has4_item is None:
+                has4_item = item
+            if "4" not in tail and no4_item is None:
+                no4_item = item
+
+            if has4_item and no4_item:
+                break
+
+        return {"has4": has4_item, "no4": no4_item}
+    finally:
+        await context.close()
 
 
 def username_add_by_rule(item):
@@ -1104,23 +1056,14 @@ async def main():
 
     async with async_playwright() as p:
         browser = await p.chromium.launch(headless=True)
-        context = await create_market_context(browser)
-        semaphore = asyncio.Semaphore(MAX_CONCURRENT_PAGES)
 
         try:
-            section_5_task = safe_build_username_section(context, USERNAMES_5_URL, 5, semaphore) if USERNAMES_5_URL else asyncio.sleep(0, result=[])
-            section_6_task = safe_build_username_section(context, USERNAMES_6_URL, 6, semaphore) if USERNAMES_6_URL else asyncio.sleep(0, result=[])
-            section_7_task = safe_build_username_section(context, USERNAMES_7_URL, 7, semaphore) if USERNAMES_7_URL else asyncio.sleep(0, result=[])
-            number_floor_task = safe_fetch_numbers_floor(context, NUMBERS_URL, ton_usd_rate, semaphore) if NUMBERS_URL else asyncio.sleep(0, result={"has4": None, "no4": None})
+            section_5 = await build_username_section(browser, USERNAMES_5_URL, 5) if USERNAMES_5_URL else []
+            section_6 = await build_username_section(browser, USERNAMES_6_URL, 6) if USERNAMES_6_URL else []
+            section_7 = await build_username_section(browser, USERNAMES_7_URL, 7) if USERNAMES_7_URL else []
 
-            section_5, section_6, section_7, number_floor = await asyncio.gather(
-                section_5_task,
-                section_6_task,
-                section_7_task,
-                number_floor_task,
-            )
+            number_floor = await fetch_numbers_floor(browser, NUMBERS_URL, ton_usd_rate) if NUMBERS_URL else {"has4": None, "no4": None}
         finally:
-            await context.close()
             await browser.close()
 
     usernames_text = build_usernames_message(section_5, section_6, section_7, ton_usd_rate)
@@ -1130,35 +1073,30 @@ async def main():
 
     await verify_telegram_bot()
 
-    update_tasks = [
-        upsert_message(
-            USERNAMES_CHAT_ID,
-            USERNAMES_MESSAGE_ID,
-            usernames_text,
-            "USERNAMES_MESSAGE_ID",
-            parse_mode="HTML",
-        ),
-        upsert_message(
-            PROMO_CHAT_ID,
-            PROMO_MESSAGE_ID,
-            promo_text,
-            "PROMO_MESSAGE_ID",
-            parse_mode="HTML",
-            reply_markup=promo_reply_markup,
-        ),
-    ]
+    await upsert_message(
+        USERNAMES_CHAT_ID,
+        USERNAMES_MESSAGE_ID,
+        usernames_text,
+        "USERNAMES_MESSAGE_ID",
+        parse_mode="HTML",
+    )
 
     if numbers_text:
-        update_tasks.append(
-            upsert_message(
-                NUMBERS_CHAT_ID,
-                NUMBERS_MESSAGE_ID,
-                numbers_text,
-                "NUMBERS_MESSAGE_ID",
-            )
+        await upsert_message(
+            NUMBERS_CHAT_ID,
+            NUMBERS_MESSAGE_ID,
+            numbers_text,
+            "NUMBERS_MESSAGE_ID",
         )
 
-    await asyncio.gather(*update_tasks)
+    await upsert_message(
+        PROMO_CHAT_ID,
+        PROMO_MESSAGE_ID,
+        promo_text,
+        "PROMO_MESSAGE_ID",
+        parse_mode="HTML",
+        reply_markup=promo_reply_markup,
+    )
 
 
 if __name__ == "__main__":

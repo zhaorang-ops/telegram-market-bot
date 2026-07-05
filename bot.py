@@ -479,13 +479,12 @@ def empty_number_floor():
     return {"has4": [], "no4": []}
 
 
-def group_number_candidates(candidates, ton_usd_rate: float):
+def group_number_candidates(candidates):
     valid = [
         item
         for item in candidates
         if has_any_price(item) and not item.get("is_restricted")
     ]
-    valid = sorted(valid, key=lambda x: candidate_sort_key(x, ton_usd_rate))
 
     groups = empty_number_floor()
     seen = {"has4": set(), "no4": set()}
@@ -526,26 +525,45 @@ def parse_number_candidate_from_row_text(text: str):
         "is_restricted": "restricted" in text.lower(),
     }
 
-    if item["usd_price"] <= 0:
-        lines = [
-            re.sub(r"\s+", " ", line.replace("\xa0", " ")).strip()
-            for line in text.splitlines()
-        ]
-        lines = [line for line in lines if line]
+    lines = [
+        re.sub(r"\s+", " ", line.replace("\xa0", " ")).strip()
+        for line in text.splitlines()
+    ]
+    lines = [line for line in lines if line]
 
-        try:
-            start_index = lines.index("On Sale") + 1
-        except ValueError:
-            start_index = 0
+    try:
+        start_index = lines.index("On Sale") + 1
+    except ValueError:
+        start_index = 0
 
-        for line in lines[start_index:]:
-            if line.startswith("~"):
-                continue
-            if not re.fullmatch(r"\d[\d,]*(?:\.\d+)?", line):
-                continue
-
-            item["usd_price"] = to_float(line, 0.0)
+    price_lines = []
+    for line in lines[start_index:]:
+        if re.search(r"\b(?:Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)\b", line):
             break
+        if line.startswith("Listed:"):
+            break
+        if re.fullmatch(r"\d+d(?:\s+\d+h)?|\d+h|\d+m", line):
+            break
+        if re.fullmatch(r"~?\$?[\d,]+(?:\.\d+)?(?:\s+GRAM)?", line):
+            price_lines.append(line)
+        if len(price_lines) >= 2:
+            break
+
+    if price_lines:
+        first_price = price_lines[0]
+        second_price = price_lines[1] if len(price_lines) > 1 else ""
+
+        if "$" in first_price:
+            item["usd_price"] = to_float(first_price, 0.0)
+            item["ton_price"] = 0.0
+        elif "GRAM" in first_price:
+            item["ton_price"] = to_float(first_price, 0.0)
+            item["usd_price"] = 0.0
+        elif "GRAM" in second_price:
+            item["usd_price"] = to_float(first_price, 0.0)
+            item["ton_price"] = 0.0
+        elif item["usd_price"] <= 0:
+            item["ton_price"] = to_float(first_price, 0.0)
 
     return item
 
@@ -934,7 +952,7 @@ async def fetch_numbers_floor(context, base_url: str, ton_usd_rate: float, semap
                     continue
 
             if json_candidates:
-                groups = group_number_candidates(json_candidates, ton_usd_rate)
+                groups = group_number_candidates(json_candidates)
 
                 if groups["has4"] or groups["no4"]:
                     return groups
@@ -948,7 +966,7 @@ async def fetch_numbers_floor(context, base_url: str, ton_usd_rate: float, semap
                 pass
 
             text_candidates = parse_number_candidates_from_page_text(await read_body_text(page))
-            groups = group_number_candidates(text_candidates, ton_usd_rate)
+            groups = group_number_candidates(text_candidates)
             if groups["has4"] or groups["no4"]:
                 return groups
 
@@ -976,14 +994,14 @@ async def fetch_numbers_floor(context, base_url: str, ton_usd_rate: float, semap
                     continue
 
                 dom_candidates.append(item)
-                groups = group_number_candidates(dom_candidates, ton_usd_rate)
+                groups = group_number_candidates(dom_candidates)
                 if (
                     len(groups["has4"]) >= NUMBER_ITEMS_PER_GROUP
                     and len(groups["no4"]) >= NUMBER_ITEMS_PER_GROUP
                 ):
                     break
 
-            return group_number_candidates(dom_candidates, ton_usd_rate)
+            return group_number_candidates(dom_candidates)
 
         finally:
             await page.close()

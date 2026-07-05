@@ -39,6 +39,7 @@ NUMBER_ADD_USD = {
     "has4": 50.0,
     "no4": 50.0,
 }
+NUMBER_ITEMS_PER_GROUP = 5
 
 PROMO_BUTTON_TEXT = "联系客服"
 PROMO_BUTTON_URL = "https://t.me/daimei1"
@@ -465,6 +466,120 @@ def normalize_888_number(value: str) -> str:
     return f"+{digits}"
 
 
+def number_tail_digits(name: str) -> str:
+    digits = re.sub(r"\D", "", name)
+    return digits[3:] if digits.startswith("888") else digits
+
+
+def number_has4(item: dict) -> bool:
+    return "4" in number_tail_digits(item["name"])
+
+
+def empty_number_floor():
+    return {"has4": [], "no4": []}
+
+
+def group_number_candidates(candidates, ton_usd_rate: float):
+    valid = [
+        item
+        for item in candidates
+        if has_any_price(item) and not item.get("is_restricted")
+    ]
+    valid = sorted(valid, key=lambda x: candidate_sort_key(x, ton_usd_rate))
+
+    groups = empty_number_floor()
+    seen = {"has4": set(), "no4": set()}
+
+    for item in valid:
+        key = "has4" if number_has4(item) else "no4"
+        name_key = item["name"].lower()
+        if name_key in seen[key]:
+            continue
+        if len(groups[key]) >= NUMBER_ITEMS_PER_GROUP:
+            continue
+
+        seen[key].add(name_key)
+        groups[key].append(item)
+
+        if (
+            len(groups["has4"]) >= NUMBER_ITEMS_PER_GROUP
+            and len(groups["no4"]) >= NUMBER_ITEMS_PER_GROUP
+        ):
+            break
+
+    return groups
+
+
+def parse_number_candidate_from_row_text(text: str):
+    if not text or "+888" not in text:
+        return None
+
+    num_match = re.search(r"\+888[\s\d]{4,20}", text)
+    if not num_match:
+        return None
+
+    name = re.sub(r"\s+", " ", num_match.group(0)).strip()
+    item = {
+        "name": name,
+        "ton_price": 0.0,
+        "usd_price": extract_usd_from_text(text),
+        "is_restricted": "restricted" in text.lower(),
+    }
+
+    if item["usd_price"] <= 0:
+        lines = [
+            re.sub(r"\s+", " ", line.replace("\xa0", " ")).strip()
+            for line in text.splitlines()
+        ]
+        lines = [line for line in lines if line]
+
+        try:
+            start_index = lines.index("On Sale") + 1
+        except ValueError:
+            start_index = 0
+
+        for line in lines[start_index:]:
+            if line.startswith("~"):
+                continue
+            if not re.fullmatch(r"\d[\d,]*(?:\.\d+)?", line):
+                continue
+
+            item["usd_price"] = to_float(line, 0.0)
+            break
+
+    return item
+
+
+def parse_number_candidates_from_page_text(text: str):
+    if not text:
+        return []
+
+    matches = list(re.finditer(r"\+888[\s\d]{4,20}", text))
+    candidates = []
+
+    for i, match in enumerate(matches):
+        end = matches[i + 1].start() if i + 1 < len(matches) else len(text)
+        item = parse_number_candidate_from_row_text(text[match.start():end])
+        if item:
+            candidates.append(item)
+
+    return candidates
+
+
+async def read_body_text(page):
+    for _ in range(3):
+        try:
+            return await page.locator("body").inner_text(timeout=TABLE_WAIT_TIMEOUT_MS)
+        except Exception:
+            try:
+                await page.wait_for_load_state("domcontentloaded", timeout=TABLE_WAIT_TIMEOUT_MS)
+            except PlaywrightTimeoutError:
+                pass
+            await page.wait_for_timeout(PAGE_SETTLE_WAIT_MS)
+
+    return ""
+
+
 def parse_number_candidates_from_json_payload(payload, ton_usd_rate: float):
     candidates = {}
 
@@ -782,7 +897,7 @@ async def safe_build_username_section(context, base_url: str, length_value: int,
 
 async def fetch_numbers_floor(context, base_url: str, ton_usd_rate: float, semaphore: asyncio.Semaphore):
     if not base_url:
-        return {"has4": None, "no4": None}
+        return empty_number_floor()
 
     async with semaphore:
         page = await context.new_page()
@@ -796,6 +911,10 @@ async def fetch_numbers_floor(context, base_url: str, ton_usd_rate: float, semap
 
         try:
             await page.goto(base_url, wait_until="domcontentloaded", timeout=PAGE_GOTO_TIMEOUT_MS)
+            try:
+                await page.wait_for_load_state("networkidle", timeout=PAGE_GOTO_TIMEOUT_MS)
+            except PlaywrightTimeoutError:
+                pass
             await page.wait_for_timeout(PAGE_SETTLE_WAIT_MS)
 
             json_candidates = []
@@ -814,23 +933,24 @@ async def fetch_numbers_floor(context, base_url: str, ton_usd_rate: float, semap
                 except Exception:
                     continue
 
-            def has4(x):
-                digits = re.sub(r"\D", "", x["name"])
-                tail = digits[3:] if digits.startswith("888") else digits
-                return "4" in tail
-
-            def no4(x):
-                digits = re.sub(r"\D", "", x["name"])
-                tail = digits[3:] if digits.startswith("888") else digits
-                return "4" not in tail
-
             if json_candidates:
-                valid = [x for x in json_candidates if has_any_price(x) and not x["is_restricted"]]
-                has4_item = next((x for x in valid if has4(x)), None)
-                no4_item = next((x for x in valid if no4(x)), None)
+                groups = group_number_candidates(json_candidates, ton_usd_rate)
 
-                if has4_item or no4_item:
-                    return {"has4": has4_item, "no4": no4_item}
+                if groups["has4"] or groups["no4"]:
+                    return groups
+
+            try:
+                await page.wait_for_function(
+                    "document.body && document.body.innerText.includes('+888')",
+                    timeout=PAGE_GOTO_TIMEOUT_MS,
+                )
+            except PlaywrightTimeoutError:
+                pass
+
+            text_candidates = parse_number_candidates_from_page_text(await read_body_text(page))
+            groups = group_number_candidates(text_candidates, ton_usd_rate)
+            if groups["has4"] or groups["no4"]:
+                return groups
 
             try:
                 await page.wait_for_selector("tr", timeout=TABLE_WAIT_TIMEOUT_MS)
@@ -843,9 +963,7 @@ async def fetch_numbers_floor(context, base_url: str, ton_usd_rate: float, semap
                 rows = page.locator("tr")
                 count = await rows.count()
 
-            has4_item = None
-            no4_item = None
-
+            dom_candidates = []
             for i in range(count):
                 row = rows.nth(i)
                 try:
@@ -853,52 +971,20 @@ async def fetch_numbers_floor(context, base_url: str, ton_usd_rate: float, semap
                 except Exception:
                     continue
 
-                if not text or "+888" not in text:
+                item = parse_number_candidate_from_row_text(text)
+                if not item:
                     continue
 
-                num_match = re.search(r"\+888[\s\d]{4,20}", text)
-                if not num_match:
-                    continue
-
-                name = re.sub(r"\s+", " ", num_match.group(0)).strip()
-                usd_price = extract_usd_from_text(text)
-                ton_price = 0.0
-
-                price_match = re.search(r"▽\s*([\d,]+(?:\.\d+)?)", text)
-                if price_match and not (usd_price > 0 and not has_ton_marker(text)):
-                    ton_price = to_float(price_match.group(1), 0.0)
-
-                if ton_price <= 0 and usd_price <= 0 and has_ton_marker(text):
-                    text_wo_name = text.replace(name, " ")
-                    ton_candidates = re.findall(r"(?<!\$)\d+(?:,\d{3})*(?:\.\d+)?", text_wo_name)
-                    for raw in ton_candidates:
-                        val = to_float(raw, 0.0)
-                        if val > 0:
-                            ton_price = val
-                            break
-
-                item = {
-                    "name": name,
-                    "ton_price": ton_price,
-                    "usd_price": usd_price,
-                    "is_restricted": "restricted" in text.lower(),
-                }
-
-                if item["is_restricted"] or not has_any_price(item):
-                    continue
-
-                digits = re.sub(r"\D", "", name)
-                tail = digits[3:] if digits.startswith("888") else digits
-
-                if "4" in tail and has4_item is None:
-                    has4_item = item
-                if "4" not in tail and no4_item is None:
-                    no4_item = item
-
-                if has4_item and no4_item:
+                dom_candidates.append(item)
+                groups = group_number_candidates(dom_candidates, ton_usd_rate)
+                if (
+                    len(groups["has4"]) >= NUMBER_ITEMS_PER_GROUP
+                    and len(groups["no4"]) >= NUMBER_ITEMS_PER_GROUP
+                ):
                     break
 
-            return {"has4": has4_item, "no4": no4_item}
+            return group_number_candidates(dom_candidates, ton_usd_rate)
+
         finally:
             await page.close()
 
@@ -908,7 +994,7 @@ async def safe_fetch_numbers_floor(context, base_url: str, ton_usd_rate: float, 
         return await fetch_numbers_floor(context, base_url, ton_usd_rate, semaphore)
     except Exception as e:
         print(f"DEBUG NUMBERS FAIL error={repr(e)}")
-        return {"has4": None, "no4": None}
+        return empty_number_floor()
 
 
 def username_add_by_rule(item):
@@ -970,23 +1056,31 @@ def build_numbers_message(number_floor, ton_usd_rate):
     now_str = datetime.now(TZ).strftime("%Y-%m-%d %H:%M:%S")
     lines = ["📱【官方888号】地板价"]
 
-    item = number_floor.get("has4")
-    if item:
-        usd_val = build_display_usd(item, ton_usd_rate, NUMBER_ADD_USD["has4"])
-        if usd_val > 0:
-            lines.append(f"【含4正常】 {item['name']} - ${display_price_int(usd_val)}")
-        else:
-            lines.append(f"【含4正常】 {item['name']} - 暂无有效价格")
+    has4_items = number_floor.get("has4") or []
+    if isinstance(has4_items, dict):
+        has4_items = [has4_items]
+
+    if has4_items:
+        for item in has4_items[:NUMBER_ITEMS_PER_GROUP]:
+            usd_val = build_display_usd(item, ton_usd_rate, NUMBER_ADD_USD["has4"])
+            if usd_val > 0:
+                lines.append(f"【含4正常】 {item['name']} - ${display_price_int(usd_val)}")
+            else:
+                lines.append(f"【含4正常】 {item['name']} - 暂无有效价格")
     else:
         lines.append("【含4正常】 暂无数据")
 
-    item = number_floor.get("no4")
-    if item:
-        usd_val = build_display_usd(item, ton_usd_rate, NUMBER_ADD_USD["no4"])
-        if usd_val > 0:
-            lines.append(f"【无4正常】 {item['name']} - ${display_price_int(usd_val)}")
-        else:
-            lines.append(f"【无4正常】 {item['name']} - 暂无有效价格")
+    no4_items = number_floor.get("no4") or []
+    if isinstance(no4_items, dict):
+        no4_items = [no4_items]
+
+    if no4_items:
+        for item in no4_items[:NUMBER_ITEMS_PER_GROUP]:
+            usd_val = build_display_usd(item, ton_usd_rate, NUMBER_ADD_USD["no4"])
+            if usd_val > 0:
+                lines.append(f"【无4正常】 {item['name']} - ${display_price_int(usd_val)}")
+            else:
+                lines.append(f"【无4正常】 {item['name']} - 暂无有效价格")
     else:
         lines.append("【无4正常】 暂无数据")
 
@@ -1111,7 +1205,7 @@ async def main():
             section_5_task = safe_build_username_section(context, USERNAMES_5_URL, 5, semaphore) if USERNAMES_5_URL else asyncio.sleep(0, result=[])
             section_6_task = safe_build_username_section(context, USERNAMES_6_URL, 6, semaphore) if USERNAMES_6_URL else asyncio.sleep(0, result=[])
             section_7_task = safe_build_username_section(context, USERNAMES_7_URL, 7, semaphore) if USERNAMES_7_URL else asyncio.sleep(0, result=[])
-            number_floor_task = safe_fetch_numbers_floor(context, NUMBERS_URL, ton_usd_rate, semaphore) if NUMBERS_URL else asyncio.sleep(0, result={"has4": None, "no4": None})
+            number_floor_task = safe_fetch_numbers_floor(context, NUMBERS_URL, ton_usd_rate, semaphore) if NUMBERS_URL else asyncio.sleep(0, result=empty_number_floor())
 
             section_5, section_6, section_7, number_floor = await asyncio.gather(
                 section_5_task,

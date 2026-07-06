@@ -455,8 +455,10 @@ def collection_address_from_url(url: str) -> str:
 
 
 def normalize_marketapp_gram_price(price: float) -> float:
-    while price > 10_000:
-        price = price / 1_000
+    if price > 1_000_000_000:
+        return price / 1_000_000_000
+    if price > 100_000:
+        return price / 1_000
     return price
 
 

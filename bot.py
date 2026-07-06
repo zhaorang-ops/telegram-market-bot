@@ -1202,13 +1202,13 @@ def build_usernames_message(section_5, section_6, section_7, ton_usd_rate):
 
 def build_numbers_message(number_floor, ton_usd_rate):
     now_str = datetime.now(TZ).strftime("%Y-%m-%d %H:%M:%S")
-    lines = ["📱【官方888号】地板价"]
+    lines = ["<tg-emoji emoji-id="5364125616801073577">✈️</tg-emoji>【官方888号】地板价"]
 
     has4_items = number_floor.get("has4") or []
     if isinstance(has4_items, dict):
         has4_items = [has4_items]
 
-    lines.append("【📱+888号码中带4】")
+    lines.append("【<tg-emoji emoji-id="5226656353744862682">🛒</tg-emoji>+888号码中带4】")
     if has4_items:
         for item in has4_items[:NUMBER_ITEMS_PER_GROUP]:
             usd_val = build_display_usd(item, ton_usd_rate, NUMBER_ADD_USD["has4"])
@@ -1224,7 +1224,7 @@ def build_numbers_message(number_floor, ton_usd_rate):
         no4_items = [no4_items]
 
     lines.append("")
-    lines.append("【📱+888号码中不带4】")
+    lines.append("【<tg-emoji emoji-id="5226656353744862682">🛒</tg-emoji>+888号码中不带4】")
     if no4_items:
         for item in no4_items[:NUMBER_ITEMS_PER_GROUP]:
             usd_val = build_display_usd(item, ton_usd_rate, NUMBER_ADD_USD["no4"])

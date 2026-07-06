@@ -42,6 +42,7 @@ NUMBER_ADD_USD = {
 }
 NUMBER_ITEMS_PER_GROUP = 5
 NUMBERS_PAGE_ATTEMPTS = int(os.environ.get("NUMBERS_PAGE_ATTEMPTS", "5") or "5")
+MARKET_BROWSER = os.environ.get("MARKET_BROWSER", "chromium").strip().lower()
 MARKET_USER_AGENT = (
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
     "AppleWebKit/537.36 (KHTML, like Gecko) "
@@ -1171,11 +1172,15 @@ async def main():
         f"sha={os.environ.get('GITHUB_SHA', 'local')} "
         f"runner={os.environ.get('RUNNER_OS', platform.system())} "
         f"python={platform.python_version()} "
+        f"browser={MARKET_BROWSER} "
         f"numbers_attempts={NUMBERS_PAGE_ATTEMPTS}"
     )
 
     async with async_playwright() as p:
-        browser = await p.chromium.launch(headless=True, args=CHROMIUM_ARGS)
+        if MARKET_BROWSER == "firefox":
+            browser = await p.firefox.launch(headless=True)
+        else:
+            browser = await p.chromium.launch(headless=True, args=CHROMIUM_ARGS)
 
         try:
             section_5 = await build_username_section(browser, USERNAMES_5_URL, 5) if USERNAMES_5_URL else []

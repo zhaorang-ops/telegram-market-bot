@@ -1,6 +1,7 @@
 import asyncio
 import json
 import os
+import platform
 import re
 from datetime import datetime
 from urllib.parse import quote
@@ -39,6 +40,8 @@ NUMBER_ADD_USD = {
     "has4": 50.0,
     "no4": 50.0,
 }
+NUMBER_ITEMS_PER_GROUP = 5
+NUMBERS_PAGE_ATTEMPTS = int(os.environ.get("NUMBERS_PAGE_ATTEMPTS", "5") or "5")
 
 PROMO_BUTTON_TEXT = "联系客服"
 PROMO_BUTTON_URL = "https://t.me/daimei1"
@@ -458,6 +461,124 @@ def normalize_888_number(value: str) -> str:
     return f"+{digits}"
 
 
+def empty_number_floor():
+    return {"has4": [], "no4": []}
+
+
+def number_tail_digits(name: str) -> str:
+    digits = re.sub(r"\D", "", name)
+    return digits[3:] if digits.startswith("888") else digits
+
+
+def number_has4(item: dict) -> bool:
+    return "4" in number_tail_digits(item["name"])
+
+
+def group_number_candidates(candidates):
+    valid = [
+        item
+        for item in candidates
+        if has_any_price(item) and not item.get("is_restricted")
+    ]
+
+    groups = empty_number_floor()
+    seen = {"has4": set(), "no4": set()}
+
+    for item in valid:
+        key = "has4" if number_has4(item) else "no4"
+        name_key = item["name"].lower()
+        if name_key in seen[key]:
+            continue
+        if len(groups[key]) >= NUMBER_ITEMS_PER_GROUP:
+            continue
+
+        seen[key].add(name_key)
+        groups[key].append(item)
+
+        if (
+            len(groups["has4"]) >= NUMBER_ITEMS_PER_GROUP
+            and len(groups["no4"]) >= NUMBER_ITEMS_PER_GROUP
+        ):
+            break
+
+    return groups
+
+
+def parse_number_candidate_from_text(text: str):
+    if not text or "+888" not in text:
+        return None
+
+    num_match = re.search(r"\+888[\s\d]{4,20}", text)
+    if not num_match:
+        return None
+
+    name = re.sub(r"\s+", " ", num_match.group(0)).strip()
+    item = {
+        "name": name,
+        "ton_price": 0.0,
+        "usd_price": extract_usd_from_text(text),
+        "is_restricted": "restricted" in text.lower(),
+    }
+
+    lines = [
+        re.sub(r"\s+", " ", line.replace("\xa0", " ")).strip()
+        for line in text.splitlines()
+    ]
+    lines = [line for line in lines if line]
+
+    try:
+        start_index = lines.index("On Sale") + 1
+    except ValueError:
+        start_index = 0
+
+    price_lines = []
+    for line in lines[start_index:]:
+        if re.search(r"\b(?:Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)\b", line):
+            break
+        if line.startswith("Listed:"):
+            break
+        if re.fullmatch(r"\d+d(?:\s+\d+h)?|\d+h|\d+m", line):
+            break
+        if re.fullmatch(r"~?\$?[\d,]+(?:\.\d+)?(?:\s+GRAM)?", line):
+            price_lines.append(line)
+        if len(price_lines) >= 2:
+            break
+
+    if price_lines:
+        first_price = price_lines[0]
+        second_price = price_lines[1] if len(price_lines) > 1 else ""
+
+        if "$" in first_price:
+            item["usd_price"] = to_float(first_price, 0.0)
+            item["ton_price"] = 0.0
+        elif "GRAM" in first_price:
+            item["ton_price"] = to_float(first_price, 0.0)
+            item["usd_price"] = 0.0
+        elif "GRAM" in second_price:
+            item["usd_price"] = to_float(first_price, 0.0)
+            item["ton_price"] = 0.0
+        elif item["usd_price"] <= 0:
+            item["ton_price"] = to_float(first_price, 0.0)
+
+    return item
+
+
+def parse_number_candidates_from_page_text(text: str):
+    if not text:
+        return []
+
+    matches = list(re.finditer(r"\+888[\s\d]{4,20}", text))
+    candidates = []
+
+    for i, match in enumerate(matches):
+        end = matches[i + 1].start() if i + 1 < len(matches) else len(text)
+        item = parse_number_candidate_from_text(text[match.start():end])
+        if item:
+            candidates.append(item)
+
+    return candidates
+
+
 def parse_number_candidates_from_json_payload(payload, ton_usd_rate: float):
     candidates = {}
 
@@ -747,24 +868,35 @@ async def build_username_section(browser, base_url: str, length_value: int):
 
 async def fetch_numbers_floor(browser, base_url: str, ton_usd_rate: float):
     if not base_url:
-        return {"has4": None, "no4": None}
+        return empty_number_floor()
 
-    context = await browser.new_context()
-    page = await context.new_page()
+    final_groups = empty_number_floor()
 
-    responses = []
+    for attempt in range(1, NUMBERS_PAGE_ATTEMPTS + 1):
+        context = await browser.new_context(locale="en-US")
+        page = await context.new_page()
 
-    def on_response(response):
-        responses.append(response)
+        responses = []
 
-    page.on("response", on_response)
+        def on_response(response):
+            responses.append(response)
 
-    try:
-        await page.goto(base_url, wait_until="domcontentloaded", timeout=30000)
+        page.on("response", on_response)
+
+        try:
+            await page.goto(base_url, wait_until="domcontentloaded", timeout=30000)
+        except Exception as e:
+            print(f"DEBUG NUMBERS attempt={attempt} goto_error={repr(e)}")
+
+        try:
+            await page.wait_for_load_state("networkidle", timeout=10000)
+        except PlaywrightTimeoutError:
+            pass
+
         await page.wait_for_timeout(3000)
 
         json_candidates = []
-        for response in responses[-30:]:
+        for response in responses[-50:]:
             try:
                 ctype = (response.headers.get("content-type") or "").lower()
                 if "application/json" not in ctype:
@@ -779,89 +911,43 @@ async def fetch_numbers_floor(browser, base_url: str, ton_usd_rate: float):
             except Exception:
                 continue
 
-        def has4(x):
-            digits = re.sub(r"\D", "", x["name"])
-            tail = digits[3:] if digits.startswith("888") else digits
-            return "4" in tail
+        json_groups = group_number_candidates(json_candidates)
+        if json_groups["has4"] or json_groups["no4"]:
+            print(
+                "DEBUG NUMBERS "
+                f"attempt={attempt} source=json json_candidates={len(json_candidates)} "
+                f"has4={len(json_groups['has4'])} no4={len(json_groups['no4'])}"
+            )
+            await context.close()
+            return json_groups
 
-        def no4(x):
-            digits = re.sub(r"\D", "", x["name"])
-            tail = digits[3:] if digits.startswith("888") else digits
-            return "4" not in tail
+        body_text = ""
+        try:
+            body_text = await page.locator("body").inner_text(timeout=10000)
+        except Exception as e:
+            print(f"DEBUG NUMBERS attempt={attempt} body_error={repr(e)}")
 
-        if json_candidates:
-            valid = [x for x in json_candidates if has_any_price(x) and not x["is_restricted"]]
-            has4_item = next((x for x in valid if has4(x)), None)
-            no4_item = next((x for x in valid if no4(x)), None)
+        text_candidates = parse_number_candidates_from_page_text(body_text)
+        text_groups = group_number_candidates(text_candidates)
+        print(
+            "DEBUG NUMBERS "
+            f"attempt={attempt} url={page.url} body_len={len(body_text)} "
+            f"plus888={body_text.count('+888')} text_candidates={len(text_candidates)} "
+            f"has4={len(text_groups['has4'])} no4={len(text_groups['no4'])}"
+        )
 
-            if has4_item or no4_item:
-                return {"has4": has4_item, "no4": no4_item}
-
-        rows = page.locator("table tbody tr")
-        count = await rows.count()
-        if count == 0:
-            rows = page.locator("tr")
-            count = await rows.count()
-
-        has4_item = None
-        no4_item = None
-
-        for i in range(count):
-            row = rows.nth(i)
-            try:
-                text = await row.inner_text()
-            except Exception:
-                continue
-
-            if not text or "+888" not in text:
-                continue
-
-            num_match = re.search(r"\+888[\s\d]{4,20}", text)
-            if not num_match:
-                continue
-
-            name = re.sub(r"\s+", " ", num_match.group(0)).strip()
-            usd_price = extract_usd_from_text(text)
-            ton_price = 0.0
-
-            price_match = re.search(r"▽\s*([\d,]+(?:\.\d+)?)", text)
-            if price_match and not (usd_price > 0 and not has_ton_marker(text)):
-                ton_price = to_float(price_match.group(1), 0.0)
-
-            if ton_price <= 0 and usd_price <= 0 and has_ton_marker(text):
-                text_wo_name = text.replace(name, " ")
-                ton_candidates = re.findall(r"(?<!\$)\d+(?:,\d{3})*(?:\.\d+)?", text_wo_name)
-                for raw in ton_candidates:
-                    val = to_float(raw, 0.0)
-                    if val > 0:
-                        ton_price = val
-                        break
-
-            item = {
-                "name": name,
-                "ton_price": ton_price,
-                "usd_price": usd_price,
-                "is_restricted": "restricted" in text.lower(),
-            }
-
-            if item["is_restricted"] or not has_any_price(item):
-                continue
-
-            digits = re.sub(r"\D", "", name)
-            tail = digits[3:] if digits.startswith("888") else digits
-
-            if "4" in tail and has4_item is None:
-                has4_item = item
-            if "4" not in tail and no4_item is None:
-                no4_item = item
-
-            if has4_item and no4_item:
-                break
-
-        return {"has4": has4_item, "no4": no4_item}
-    finally:
         await context.close()
 
+        if text_groups["has4"] or text_groups["no4"]:
+            return text_groups
+
+        final_groups = text_groups
+
+    print(
+        "DEBUG NUMBERS final "
+        f"has4={len(final_groups['has4'])} no4={len(final_groups['no4'])}"
+    )
+    return final_groups
 
 def username_add_by_rule(item):
     length_value = item.get("length")
@@ -922,25 +1008,33 @@ def build_numbers_message(number_floor, ton_usd_rate):
     now_str = datetime.now(TZ).strftime("%Y-%m-%d %H:%M:%S")
     lines = ["📱【官方888号】地板价"]
 
-    item = number_floor.get("has4")
-    if item:
-        usd_val = build_display_usd(item, ton_usd_rate, NUMBER_ADD_USD["has4"])
-        if usd_val > 0:
-            lines.append(f"【含4正常】 {item['name']} - ${display_price_int(usd_val)}")
-        else:
-            lines.append(f"【含4正常】 {item['name']} - 暂无有效价格")
-    else:
-        lines.append("【含4正常】 暂无数据")
+    has4_items = number_floor.get("has4") or []
+    if isinstance(has4_items, dict):
+        has4_items = [has4_items]
 
-    item = number_floor.get("no4")
-    if item:
-        usd_val = build_display_usd(item, ton_usd_rate, NUMBER_ADD_USD["no4"])
-        if usd_val > 0:
-            lines.append(f"【无4正常】 {item['name']} - ${display_price_int(usd_val)}")
-        else:
-            lines.append(f"【无4正常】 {item['name']} - 暂无有效价格")
+    if has4_items:
+        for item in has4_items[:NUMBER_ITEMS_PER_GROUP]:
+            usd_val = build_display_usd(item, ton_usd_rate, NUMBER_ADD_USD["has4"])
+            if usd_val > 0:
+                lines.append(f"[has4] {item['name']} - ${display_price_int(usd_val)}")
+            else:
+                lines.append(f"[has4] {item['name']} - no valid price")
     else:
-        lines.append("【无4正常】 暂无数据")
+        lines.append("[has4] no data")
+
+    no4_items = number_floor.get("no4") or []
+    if isinstance(no4_items, dict):
+        no4_items = [no4_items]
+
+    if no4_items:
+        for item in no4_items[:NUMBER_ITEMS_PER_GROUP]:
+            usd_val = build_display_usd(item, ton_usd_rate, NUMBER_ADD_USD["no4"])
+            if usd_val > 0:
+                lines.append(f"[no4] {item['name']} - ${display_price_int(usd_val)}")
+            else:
+                lines.append(f"[no4] {item['name']} - no valid price")
+    else:
+        lines.append("[no4] no data")
 
     lines.append("")
     lines.append("📱 自有500+号码库存")
@@ -1053,6 +1147,13 @@ async def upsert_message(chat_id: str, message_id, text: str, label: str, parse_
 
 async def main():
     ton_usd_rate = await fetch_ton_usd_rate()
+    print(
+        "DEBUG RUNTIME "
+        f"sha={os.environ.get('GITHUB_SHA', 'local')} "
+        f"runner={os.environ.get('RUNNER_OS', platform.system())} "
+        f"python={platform.python_version()} "
+        f"numbers_attempts={NUMBERS_PAGE_ATTEMPTS}"
+    )
 
     async with async_playwright() as p:
         browser = await p.chromium.launch(headless=True)

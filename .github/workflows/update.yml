@@ -12,6 +12,7 @@ jobs:
 
     env:
       BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+      MARKETAPP_API_TOKEN: ${{ secrets.MARKETAPP_API_TOKEN }}
 
       USERNAMES_CHAT_ID: ${{ secrets.USERNAMES_CHAT_ID }}
       USERNAMES_MESSAGE_ID: ${{ secrets.USERNAMES_MESSAGE_ID }}

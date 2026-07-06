@@ -42,6 +42,17 @@ NUMBER_ADD_USD = {
 }
 NUMBER_ITEMS_PER_GROUP = 5
 NUMBERS_PAGE_ATTEMPTS = int(os.environ.get("NUMBERS_PAGE_ATTEMPTS", "5") or "5")
+MARKET_USER_AGENT = (
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+    "AppleWebKit/537.36 (KHTML, like Gecko) "
+    "Chrome/126.0.0.0 Safari/537.36"
+)
+CHROMIUM_ARGS = [
+    "--disable-http2",
+    "--disable-quic",
+    "--ignore-certificate-errors",
+    "--disable-blink-features=AutomationControlled",
+]
 
 PROMO_BUTTON_TEXT = "联系客服"
 PROMO_BUTTON_URL = "https://t.me/daimei1"
@@ -738,7 +749,11 @@ async def extract_first_row_from_page(page, expected_length: int):
 
 
 async def fetch_query_result(browser, url: str, expected_length: int):
-    context = await browser.new_context()
+    context = await browser.new_context(
+        ignore_https_errors=True,
+        locale="en-US",
+        user_agent=MARKET_USER_AGENT,
+    )
     page = await context.new_page()
 
     responses = []
@@ -873,7 +888,11 @@ async def fetch_numbers_floor(browser, base_url: str, ton_usd_rate: float):
     final_groups = empty_number_floor()
 
     for attempt in range(1, NUMBERS_PAGE_ATTEMPTS + 1):
-        context = await browser.new_context(locale="en-US")
+        context = await browser.new_context(
+            ignore_https_errors=True,
+            locale="en-US",
+            user_agent=MARKET_USER_AGENT,
+        )
         page = await context.new_page()
 
         responses = []
@@ -1156,7 +1175,7 @@ async def main():
     )
 
     async with async_playwright() as p:
-        browser = await p.chromium.launch(headless=True)
+        browser = await p.chromium.launch(headless=True, args=CHROMIUM_ARGS)
 
         try:
             section_5 = await build_username_section(browser, USERNAMES_5_URL, 5) if USERNAMES_5_URL else []

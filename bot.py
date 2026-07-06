@@ -30,6 +30,8 @@ NUMBERS_URL = os.environ.get("NUMBERS_URL", "").strip()
 MARKETAPP_API_TOKEN = os.environ.get("MARKETAPP_API_TOKEN", "").strip()
 MARKETAPP_API_BASE = os.environ.get("MARKETAPP_API_BASE", "https://api.marketapp.ws").rstrip("/")
 MARKETAPP_API_MAX_PAGES = int(os.environ.get("MARKETAPP_API_MAX_PAGES", "5") or "5")
+USERNAME_API_PRICE_LIMIT_GRAM = float(os.environ.get("USERNAME_API_PRICE_LIMIT_GRAM", "5000") or "5000")
+USERNAME_API_MAX_PAGES = int(os.environ.get("USERNAME_API_MAX_PAGES", "200") or "200")
 
 TZ = ZoneInfo(os.environ.get("TZ", "Asia/Shanghai"))
 
@@ -150,6 +152,12 @@ def display_price_int(value: float) -> int:
     if value <= 0:
         return 0
     return int(value) + 1
+
+
+def display_number_price_int(value: float) -> int:
+    if value <= 0:
+        return 0
+    return int(value)
 
 
 def username_clean(name: str) -> str:
@@ -457,8 +465,25 @@ def prices_from_marketapp_api_item(item: dict):
     if currency == "USDT":
         return 0.0, price
     if currency == "GRAM":
-        return normalize_ton_amount(price), 0.0
+        if price > 1_000_000:
+            price = price / 1_000_000
+        return 0.0, price
     return price, 0.0
+
+
+def gram_price_from_marketapp_api_item(item: dict) -> float:
+    price = to_float(item.get("min_bid"), 0.0)
+    if price <= 0:
+        price = to_float(item.get("max_bid"), 0.0)
+    if price <= 0:
+        return 0.0
+
+    currency = str(item.get("currency") or "").upper()
+    if currency != "GRAM":
+        return 0.0
+    if price > 1_000_000:
+        price = price / 1_000_000
+    return price
 
 
 def username_candidate_from_api_item(item: dict, expected_length: int):
@@ -747,12 +772,18 @@ async def fetch_ton_usd_rate():
         return 0.0
 
 
-async def fetch_marketapp_api_collection_items(collection_address: str, label: str):
+async def fetch_marketapp_api_collection_items(
+    collection_address: str,
+    label: str,
+    max_pages=None,
+    stop_after_gram_price=None,
+):
     if not MARKETAPP_API_TOKEN or not collection_address:
         return None
 
     items = []
     cursor = None
+    page_limit = max_pages or MARKETAPP_API_MAX_PAGES
     headers = {
         "Authorization": MARKETAPP_API_TOKEN,
         "Accept": "application/json",
@@ -760,7 +791,7 @@ async def fetch_marketapp_api_collection_items(collection_address: str, label: s
 
     try:
         async with httpx.AsyncClient(timeout=30) as client:
-            for page_num in range(1, MARKETAPP_API_MAX_PAGES + 1):
+            for page_num in range(1, page_limit + 1):
                 params = {
                     "filter_by": "onsale",
                     "limit": 100,
@@ -779,14 +810,25 @@ async def fetch_marketapp_api_collection_items(collection_address: str, label: s
                 page_items = payload.get("items") or []
                 items.extend(page_items)
                 cursor = payload.get("cursor")
+                gram_prices = [
+                    gram_price_from_marketapp_api_item(item)
+                    for item in page_items
+                ]
+                gram_prices = [price for price in gram_prices if price > 0]
+                page_min_gram = min(gram_prices, default=0.0)
 
                 print(
                     "DEBUG API COLLECTION "
                     f"label={label} page={page_num} items={len(page_items)} total={len(items)} "
-                    f"has_cursor={bool(cursor)}"
+                    f"has_cursor={bool(cursor)} min_gram={page_min_gram:.2f}"
                 )
 
                 if not cursor or not page_items:
+                    break
+                if (
+                    stop_after_gram_price is not None
+                    and page_min_gram > stop_after_gram_price
+                ):
                     break
     except Exception as e:
         print(f"DEBUG API COLLECTION FAIL label={label} error={type(e).__name__}: {e}")
@@ -950,15 +992,26 @@ async def build_username_section(browser, base_url: str, length_value: int):
     used = set()
     last_price = None
 
-    api_items = await fetch_marketapp_api_collection_items(
-        collection_address_from_url(base_url),
-        f"usernames-{length_value}",
-    )
-    if api_items is not None:
+    if MARKETAPP_API_TOKEN:
+        api_items = await fetch_marketapp_api_collection_items(
+            collection_address_from_url(base_url),
+            f"usernames-{length_value}",
+            max_pages=USERNAME_API_MAX_PAGES,
+            stop_after_gram_price=USERNAME_API_PRICE_LIMIT_GRAM,
+        )
+        if api_items is None:
+            print(f"ERROR API USERNAMES length={length_value} unavailable; skip browser fallback")
+            return []
+
         api_candidates = []
         for raw in api_items:
             item = username_candidate_from_api_item(raw, length_value)
-            if item and not item.get("is_restricted"):
+            gram_price = gram_price_from_marketapp_api_item(raw)
+            if (
+                item
+                and not item.get("is_restricted")
+                and (gram_price <= 0 or gram_price <= USERNAME_API_PRICE_LIMIT_GRAM)
+            ):
                 api_candidates.append(item)
 
         for rule_name, run_len, kind in rules:
@@ -991,7 +1044,8 @@ async def build_username_section(browser, base_url: str, length_value: int):
 
         print(
             "DEBUG API USERNAMES "
-            f"length={length_value} candidates={len(api_candidates)} selected={len(selected)}"
+            f"length={length_value} candidates={len(api_candidates)} selected={len(selected)} "
+            f"price_limit_gram={USERNAME_API_PRICE_LIMIT_GRAM:.0f}"
         )
         return selected[: len(rules) + extra_count]
 
@@ -1202,18 +1256,18 @@ def build_usernames_message(section_5, section_6, section_7, ton_usd_rate):
 
 def build_numbers_message(number_floor, ton_usd_rate):
     now_str = datetime.now(TZ).strftime("%Y-%m-%d %H:%M:%S")
-    lines = ["<tg-emoji emoji-id="5364125616801073577">✈️</tg-emoji>【官方888号】地板价"]
+    lines = ["📱【官方888号】地板价"]
 
     has4_items = number_floor.get("has4") or []
     if isinstance(has4_items, dict):
         has4_items = [has4_items]
 
-    lines.append("【<tg-emoji emoji-id="5226656353744862682">🛒</tg-emoji>+888号码中带4】")
+    lines.append("【📱+888号码中带4】")
     if has4_items:
         for item in has4_items[:NUMBER_ITEMS_PER_GROUP]:
             usd_val = build_display_usd(item, ton_usd_rate, NUMBER_ADD_USD["has4"])
             if usd_val > 0:
-                lines.append(f"{item['name']} - ${display_price_int(usd_val)}")
+                lines.append(f"{item['name']} - ${display_number_price_int(usd_val)}")
             else:
                 lines.append(f"{item['name']} - 暂无有效价格")
     else:
@@ -1224,12 +1278,12 @@ def build_numbers_message(number_floor, ton_usd_rate):
         no4_items = [no4_items]
 
     lines.append("")
-    lines.append("【<tg-emoji emoji-id="5226656353744862682">🛒</tg-emoji>+888号码中不带4】")
+    lines.append("【📱+888号码中不带4】")
     if no4_items:
         for item in no4_items[:NUMBER_ITEMS_PER_GROUP]:
             usd_val = build_display_usd(item, ton_usd_rate, NUMBER_ADD_USD["no4"])
             if usd_val > 0:
-                lines.append(f"{item['name']} - ${display_price_int(usd_val)}")
+                lines.append(f"{item['name']} - ${display_number_price_int(usd_val)}")
             else:
                 lines.append(f"{item['name']} - 暂无有效价格")
     else:
@@ -1344,6 +1398,28 @@ async def upsert_message(chat_id: str, message_id, text: str, label: str, parse_
     print(f"IMPORTANT: Update {label} secret to:", new_message_id)
 
 
+async def update_required_message(chat_id: str, message_id, text: str, label: str, parse_mode=None):
+    try:
+        edited = await edit_existing_message(
+            chat_id,
+            message_id,
+            text,
+            label,
+            parse_mode=parse_mode,
+        )
+    except Exception as e:
+        message = f"{label} edit failed: {type(e).__name__}: {e}"
+        print(f"ERROR: {message}")
+        return message
+
+    if edited:
+        return None
+
+    message = f"{label} edit failed; update the {label} secret to the existing Telegram message id"
+    print(f"ERROR: {message}")
+    return message
+
+
 async def main():
     ton_usd_rate = await fetch_ton_usd_rate()
     print(
@@ -1377,7 +1453,7 @@ async def main():
 
     await verify_telegram_bot()
 
-    await upsert_message(
+    usernames_update_error = await update_required_message(
         USERNAMES_CHAT_ID,
         USERNAMES_MESSAGE_ID,
         usernames_text,
@@ -1401,6 +1477,9 @@ async def main():
         parse_mode="HTML",
         reply_markup=promo_reply_markup,
     )
+
+    if usernames_update_error:
+        raise RuntimeError(usernames_update_error)
 
 
 if __name__ == "__main__":

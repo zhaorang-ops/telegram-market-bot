@@ -455,10 +455,8 @@ def collection_address_from_url(url: str) -> str:
 
 
 def normalize_marketapp_gram_price(price: float) -> float:
-    if price > 1_000_000_000:
-        return price / 1_000_000
-    if price > 100_000:
-        return price / 1_000
+    while price > 10_000:
+        price = price / 1_000
     return price
 
 
@@ -1375,6 +1373,7 @@ async def edit_existing_message(chat_id: str, message_id, text: str, label: str,
         return True
 
     if error_code in {400, 404}:
+        print(f"ERROR TELEGRAM EDIT label={label} code={error_code} description={desc}")
         return False
 
     raise RuntimeError(f"Telegram edit failed for {label}: {data}")

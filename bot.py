@@ -27,6 +27,9 @@ USERNAMES_6_URL = os.environ.get("USERNAMES_6_URL", "").strip()
 USERNAMES_7_URL = os.environ.get("USERNAMES_7_URL", "").strip()
 
 NUMBERS_URL = os.environ.get("NUMBERS_URL", "").strip()
+MARKETAPP_API_TOKEN = os.environ.get("MARKETAPP_API_TOKEN", "").strip()
+MARKETAPP_API_BASE = os.environ.get("MARKETAPP_API_BASE", "https://api.marketapp.ws").rstrip("/")
+MARKETAPP_API_MAX_PAGES = int(os.environ.get("MARKETAPP_API_MAX_PAGES", "5") or "5")
 
 TZ = ZoneInfo(os.environ.get("TZ", "Asia/Shanghai"))
 
@@ -436,6 +439,64 @@ def build_display_usd(item: dict, ton_usd_rate: float, add_usd: float) -> float:
     return 0.0
 
 
+def collection_address_from_url(url: str) -> str:
+    if not url:
+        return ""
+    m = re.search(r"/collection/([^/?#]+)", url)
+    return m.group(1) if m else ""
+
+
+def prices_from_marketapp_api_item(item: dict):
+    price = to_float(item.get("min_bid"), 0.0)
+    if price <= 0:
+        price = to_float(item.get("max_bid"), 0.0)
+    if price <= 0:
+        return 0.0, 0.0
+
+    currency = str(item.get("currency") or "").upper()
+    if currency == "USDT":
+        return 0.0, price
+    return price, 0.0
+
+
+def username_candidate_from_api_item(item: dict, expected_length: int):
+    name = normalize_username(str(item.get("name") or ""))
+    if not looks_like_username(name, expected_length):
+        return None
+
+    ton_price, usd_price = prices_from_marketapp_api_item(item)
+    if ton_price <= 0 and usd_price <= 0:
+        return None
+
+    return {
+        "name": name,
+        "length": expected_length,
+        "ton_price": ton_price,
+        "usd_price": usd_price,
+        "is_on_sale": True,
+        "is_restricted": bool(item.get("is_restricted")),
+        "raw": item,
+    }
+
+
+def number_candidate_from_api_item(item: dict):
+    name = normalize_888_number(str(item.get("name") or ""))
+    if not looks_like_888_number(name):
+        return None
+
+    ton_price, usd_price = prices_from_marketapp_api_item(item)
+    if ton_price <= 0 and usd_price <= 0:
+        return None
+
+    return {
+        "name": name,
+        "ton_price": ton_price,
+        "usd_price": usd_price,
+        "is_restricted": bool(item.get("is_restricted")),
+        "raw": item,
+    }
+
+
 def candidate_sort_key(item: dict, ton_usd_rate: float):
     display_usd = build_display_usd(item, ton_usd_rate, 0.0)
     if display_usd > 0:
@@ -684,6 +745,54 @@ async def fetch_ton_usd_rate():
         return 0.0
 
 
+async def fetch_marketapp_api_collection_items(collection_address: str, label: str):
+    if not MARKETAPP_API_TOKEN or not collection_address:
+        return None
+
+    items = []
+    cursor = None
+    headers = {
+        "Authorization": MARKETAPP_API_TOKEN,
+        "Accept": "application/json",
+    }
+
+    try:
+        async with httpx.AsyncClient(timeout=30) as client:
+            for page_num in range(1, MARKETAPP_API_MAX_PAGES + 1):
+                params = {
+                    "filter_by": "onsale",
+                    "limit": 100,
+                }
+                if cursor:
+                    params["cursor"] = cursor
+
+                resp = await client.get(
+                    f"{MARKETAPP_API_BASE}/v1/nfts/collections/{collection_address}/",
+                    params=params,
+                    headers=headers,
+                )
+                resp.raise_for_status()
+                payload = resp.json()
+
+                page_items = payload.get("items") or []
+                items.extend(page_items)
+                cursor = payload.get("cursor")
+
+                print(
+                    "DEBUG API COLLECTION "
+                    f"label={label} page={page_num} items={len(page_items)} total={len(items)} "
+                    f"has_cursor={bool(cursor)}"
+                )
+
+                if not cursor or not page_items:
+                    break
+    except Exception as e:
+        print(f"DEBUG API COLLECTION FAIL label={label} error={type(e).__name__}: {e}")
+        return None
+
+    return items
+
+
 def add_or_replace_query(base_url: str, query_value: str) -> str:
     if not base_url:
         return ""
@@ -839,6 +948,51 @@ async def build_username_section(browser, base_url: str, length_value: int):
     used = set()
     last_price = None
 
+    api_items = await fetch_marketapp_api_collection_items(
+        collection_address_from_url(base_url),
+        f"usernames-{length_value}",
+    )
+    if api_items is not None:
+        api_candidates = []
+        for raw in api_items:
+            item = username_candidate_from_api_item(raw, length_value)
+            if item and not item.get("is_restricted"):
+                api_candidates.append(item)
+
+        for rule_name, run_len, kind in rules:
+            matches = [
+                item
+                for item in api_candidates
+                if item["name"].lower() not in used
+                and rule_match(username_clean(item["name"]), rule_name, run_len, kind)
+            ]
+            chosen = min(matches, key=lambda x: candidate_sort_key(x, 1.0), default=None)
+            if chosen is None:
+                continue
+
+            chosen["matched_rule"] = rule_name
+            used.add(chosen["name"].lower())
+            selected.append(chosen)
+
+        if extra_count > 0:
+            extras = [
+                item
+                for item in sorted(api_candidates, key=lambda x: candidate_sort_key(x, 1.0))
+                if item["name"].lower() not in used
+            ]
+            for item in extras:
+                if len(selected) >= len(rules) + extra_count:
+                    break
+                item["matched_rule"] = "extra"
+                used.add(item["name"].lower())
+                selected.append(item)
+
+        print(
+            "DEBUG API USERNAMES "
+            f"length={length_value} candidates={len(api_candidates)} selected={len(selected)}"
+        )
+        return selected[: len(rules) + extra_count]
+
     for rule_name, run_len, kind in rules:
         chosen = await fetch_best_match_by_query(browser, base_url, length_value, rule_name, run_len, kind)
 
@@ -885,6 +1039,26 @@ async def build_username_section(browser, base_url: str, length_value: int):
 async def fetch_numbers_floor(browser, base_url: str, ton_usd_rate: float):
     if not base_url:
         return empty_number_floor()
+
+    api_items = await fetch_marketapp_api_collection_items(
+        collection_address_from_url(base_url),
+        "numbers",
+    )
+    if api_items is not None:
+        api_candidates = []
+        for raw in api_items:
+            item = number_candidate_from_api_item(raw)
+            if item:
+                api_candidates.append(item)
+
+        api_groups = group_number_candidates(
+            sorted(api_candidates, key=lambda x: candidate_sort_key(x, ton_usd_rate))
+        )
+        print(
+            "DEBUG API NUMBERS "
+            f"candidates={len(api_candidates)} has4={len(api_groups['has4'])} no4={len(api_groups['no4'])}"
+        )
+        return api_groups
 
     final_groups = empty_number_floor()
 
@@ -994,7 +1168,7 @@ def build_usernames_message(section_5, section_6, section_7, ton_usd_rate):
     else:
         for item in section_5:
             add_usd = username_add_by_rule(item)
-            usd_val = usd_after_add(item["ton_price"], ton_usd_rate, add_usd)
+            usd_val = build_display_usd(item, ton_usd_rate, add_usd)
             lines.append(f"{item['name']}  ${display_price_int(usd_val)}")
 
     lines.append("")
@@ -1004,7 +1178,7 @@ def build_usernames_message(section_5, section_6, section_7, ton_usd_rate):
     else:
         for item in section_6:
             add_usd = username_add_by_rule(item)
-            usd_val = usd_after_add(item["ton_price"], ton_usd_rate, add_usd)
+            usd_val = build_display_usd(item, ton_usd_rate, add_usd)
             lines.append(f"{item['name']}  ${display_price_int(usd_val)}")
 
     lines.append("")
@@ -1014,7 +1188,7 @@ def build_usernames_message(section_5, section_6, section_7, ton_usd_rate):
     else:
         for item in section_7:
             add_usd = username_add_by_rule(item)
-            usd_val = usd_after_add(item["ton_price"], ton_usd_rate, add_usd)
+            usd_val = build_display_usd(item, ton_usd_rate, add_usd)
             lines.append(f"{item['name']}  ${display_price_int(usd_val)}")
 
     lines.append("")

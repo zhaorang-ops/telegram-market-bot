@@ -40,8 +40,8 @@ USERNAME_ADD_USD = {
 }
 
 NUMBER_ADD_USD = {
-    "has4": 50.0,
-    "no4": 50.0,
+    "has4": 58.0,
+    "no4": 58.0,
 }
 NUMBER_ITEMS_PER_GROUP = 5
 NUMBERS_PAGE_ATTEMPTS = int(os.environ.get("NUMBERS_PAGE_ATTEMPTS", "5") or "5")
@@ -456,6 +456,8 @@ def prices_from_marketapp_api_item(item: dict):
     currency = str(item.get("currency") or "").upper()
     if currency == "USDT":
         return 0.0, price
+    if currency == "GRAM":
+        return normalize_ton_amount(price), 0.0
     return price, 0.0
 
 
@@ -1206,29 +1208,32 @@ def build_numbers_message(number_floor, ton_usd_rate):
     if isinstance(has4_items, dict):
         has4_items = [has4_items]
 
+    lines.append("【📱+888号码中带4】")
     if has4_items:
         for item in has4_items[:NUMBER_ITEMS_PER_GROUP]:
             usd_val = build_display_usd(item, ton_usd_rate, NUMBER_ADD_USD["has4"])
             if usd_val > 0:
-                lines.append(f"[has4] {item['name']} - ${display_price_int(usd_val)}")
+                lines.append(f"{item['name']} - ${display_price_int(usd_val)}")
             else:
-                lines.append(f"[has4] {item['name']} - no valid price")
+                lines.append(f"{item['name']} - 暂无有效价格")
     else:
-        lines.append("[has4] no data")
+        lines.append("暂无数据")
 
     no4_items = number_floor.get("no4") or []
     if isinstance(no4_items, dict):
         no4_items = [no4_items]
 
+    lines.append("")
+    lines.append("【📱+888号码中不带4】")
     if no4_items:
         for item in no4_items[:NUMBER_ITEMS_PER_GROUP]:
             usd_val = build_display_usd(item, ton_usd_rate, NUMBER_ADD_USD["no4"])
             if usd_val > 0:
-                lines.append(f"[no4] {item['name']} - ${display_price_int(usd_val)}")
+                lines.append(f"{item['name']} - ${display_price_int(usd_val)}")
             else:
-                lines.append(f"[no4] {item['name']} - no valid price")
+                lines.append(f"{item['name']} - 暂无有效价格")
     else:
-        lines.append("[no4] no data")
+        lines.append("暂无数据")
 
     lines.append("")
     lines.append("📱 自有500+号码库存")

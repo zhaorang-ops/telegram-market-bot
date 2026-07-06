@@ -30,6 +30,7 @@ jobs:
 
       TZ: "Asia/Shanghai"
       TON_USD_OVERRIDE: ""
+      MARKET_BROWSER: "firefox"
 
     steps:
       - name: Checkout
@@ -47,7 +48,7 @@ jobs:
 
       - name: Install Playwright browser
         run: |
-          python -m playwright install chromium
+          python -m playwright install firefox
 
       - name: Run bot
         run: python bot.py

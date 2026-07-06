@@ -454,6 +454,14 @@ def collection_address_from_url(url: str) -> str:
     return m.group(1) if m else ""
 
 
+def normalize_marketapp_gram_price(price: float) -> float:
+    if price > 1_000_000_000:
+        return price / 1_000_000
+    if price > 100_000:
+        return price / 1_000
+    return price
+
+
 def prices_from_marketapp_api_item(item: dict):
     price = to_float(item.get("min_bid"), 0.0)
     if price <= 0:
@@ -465,9 +473,7 @@ def prices_from_marketapp_api_item(item: dict):
     if currency == "USDT":
         return 0.0, price
     if currency == "GRAM":
-        if price > 1_000_000:
-            price = price / 1_000_000
-        return 0.0, price
+        return normalize_marketapp_gram_price(price), 0.0
     return price, 0.0
 
 
@@ -481,9 +487,7 @@ def gram_price_from_marketapp_api_item(item: dict) -> float:
     currency = str(item.get("currency") or "").upper()
     if currency != "GRAM":
         return 0.0
-    if price > 1_000_000:
-        price = price / 1_000_000
-    return price
+    return normalize_marketapp_gram_price(price)
 
 
 def username_candidate_from_api_item(item: dict, expected_length: int):

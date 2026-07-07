@@ -1445,16 +1445,10 @@ async def build_username_section(browser, base_url: str, length_value: int):
             api_items = []
 
         api_candidates = api_username_candidates(api_items, length_value)
-        selected, used, api_matched = pick_rule_matches(api_candidates, rules)
-        missing_rules = [
-            rule
-            for rule in rules
-            if rule[0] not in api_matched
-        ]
 
         query_pool = {}
         query_count = 0
-        for rule_name, run_len, kind in missing_rules:
+        for rule_name, run_len, kind in rules:
             for q in query_values_for_rule(rule_name, run_len, kind):
                 query_count += 1
                 url = add_or_replace_query(base_url, q)
@@ -1468,16 +1462,22 @@ async def build_username_section(browser, base_url: str, length_value: int):
                     query_items = []
                 merge_username_candidates(query_pool, query_items)
 
-        selected, used, query_matched = pick_rule_matches(
-            query_pool,
+        selected, used, query_matched = pick_rule_matches(query_pool, rules)
+        missing_rules = [
+            rule
+            for rule in rules
+            if rule[0] not in query_matched
+        ]
+        selected, used, api_matched = pick_rule_matches(
+            api_candidates,
             rules,
             selected=selected,
             used=used,
             only_rules={rule[0] for rule in missing_rules},
         )
 
-        all_candidates = dict(api_candidates)
-        merge_username_candidates(all_candidates, query_pool.values())
+        all_candidates = dict(query_pool)
+        merge_username_candidates(all_candidates, api_candidates.values())
         selected = add_extra_username_items(
             all_candidates,
             selected,
@@ -1488,8 +1488,8 @@ async def build_username_section(browser, base_url: str, length_value: int):
         print(
             "DEBUG USERNAMES "
             f"length={length_value} api_items={len(api_items)} api_candidates={len(api_candidates)} "
-            f"api_rules={len(api_matched)} missing_rules={len(missing_rules)} "
             f"query_requests={query_count} query_pool={len(query_pool)} query_rules={len(query_matched)} "
+            f"api_rules={len(api_matched)} missing_rules_after_query={len(missing_rules)} "
             f"final_selected={len(selected)} "
             f"price_limit_gram={USERNAME_API_PRICE_LIMIT_GRAM:.0f} "
             f"official_api_cursor_cap={cache_key in MARKETAPP_API_COLLECTION_CAPS}"

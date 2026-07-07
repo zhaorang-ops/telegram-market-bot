@@ -32,6 +32,7 @@ MARKETAPP_API_BASE = os.environ.get("MARKETAPP_API_BASE", "https://api.marketapp
 MARKETAPP_API_MAX_PAGES = int(os.environ.get("MARKETAPP_API_MAX_PAGES", "5") or "5")
 USERNAME_API_PRICE_LIMIT_GRAM = float(os.environ.get("USERNAME_API_PRICE_LIMIT_GRAM", "5000") or "5000")
 USERNAME_API_MAX_PAGES = int(os.environ.get("USERNAME_API_MAX_PAGES", "200") or "200")
+MARKETAPP_API_COLLECTION_CACHE = {}
 
 TZ = ZoneInfo(os.environ.get("TZ", "Asia/Shanghai"))
 
@@ -788,6 +789,12 @@ async def fetch_marketapp_api_collection_items(
     items = []
     cursor = None
     page_limit = max_pages or MARKETAPP_API_MAX_PAGES
+    cache_key = (collection_address, page_limit, stop_after_gram_price)
+    if cache_key in MARKETAPP_API_COLLECTION_CACHE:
+        cached_items = MARKETAPP_API_COLLECTION_CACHE[cache_key]
+        print(f"DEBUG API COLLECTION CACHE label={label} total={len(cached_items)}")
+        return cached_items
+
     headers = {
         "Authorization": MARKETAPP_API_TOKEN,
         "Accept": "application/json",
@@ -808,7 +815,16 @@ async def fetch_marketapp_api_collection_items(
                     params=params,
                     headers=headers,
                 )
-                resp.raise_for_status()
+                try:
+                    resp.raise_for_status()
+                except httpx.HTTPStatusError as e:
+                    if e.response.status_code == 400 and items:
+                        print(
+                            "DEBUG API COLLECTION STOP "
+                            f"label={label} page={page_num} status=400 total={len(items)}"
+                        )
+                        break
+                    raise
                 payload = resp.json()
 
                 page_items = payload.get("items") or []
@@ -838,6 +854,7 @@ async def fetch_marketapp_api_collection_items(
         print(f"DEBUG API COLLECTION FAIL label={label} error={type(e).__name__}: {e}")
         return None
 
+    MARKETAPP_API_COLLECTION_CACHE[cache_key] = items
     return items
 
 

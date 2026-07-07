@@ -33,6 +33,9 @@ MARKETAPP_API_MAX_PAGES = int(os.environ.get("MARKETAPP_API_MAX_PAGES", "5") or 
 USERNAME_API_PRICE_LIMIT_GRAM = float(os.environ.get("USERNAME_API_PRICE_LIMIT_GRAM", "5000") or "5000")
 USERNAME_API_MAX_PAGES = int(os.environ.get("USERNAME_API_MAX_PAGES", "200") or "200")
 MARKETAPP_API_COLLECTION_CACHE = {}
+MARKETAPP_API_COLLECTION_CAPS = set()
+USERNAME_DEEP_FETCH_SECONDS = int(os.environ.get("USERNAME_DEEP_FETCH_SECONDS", "540") or "540")
+USERNAME_BROWSER_SCROLLS = int(os.environ.get("USERNAME_BROWSER_SCROLLS", "80") or "80")
 
 TZ = ZoneInfo(os.environ.get("TZ", "Asia/Shanghai"))
 
@@ -529,6 +532,72 @@ def number_candidate_from_api_item(item: dict):
     }
 
 
+def parse_candidates_from_json_payload(payload, expected_length: int):
+    candidates = {}
+
+    def add_candidate(name: str, ton_price: float, usd_price: float, raw_obj):
+        if not looks_like_username(name, expected_length):
+            return
+        if ton_price <= 0 and usd_price <= 0:
+            return
+
+        restricted = False
+        for k, v in deep_walk(raw_obj):
+            key_l = str(k).lower()
+            if "restricted" in key_l:
+                restricted = str(v).strip().lower() in {"true", "1", "yes", "restricted"}
+                break
+            if key_l == "status" and isinstance(v, str) and "restricted" in v.lower():
+                restricted = True
+                break
+
+        item = {
+            "name": normalize_username(name),
+            "length": expected_length,
+            "ton_price": ton_price,
+            "usd_price": usd_price,
+            "is_on_sale": True,
+            "is_restricted": restricted,
+            "raw": raw_obj,
+        }
+        key = item["name"].lower()
+        old = candidates.get(key)
+        if old is None or candidate_sort_key(item, 1.0) < candidate_sort_key(old, 1.0):
+            candidates[key] = item
+
+    roots = payload if isinstance(payload, list) else [payload]
+    for root in roots:
+        if not isinstance(root, dict):
+            continue
+
+        maybe_objects = [root]
+        for _, v in deep_walk(root):
+            if isinstance(v, dict):
+                maybe_objects.append(v)
+
+        for obj in maybe_objects:
+            names = []
+            for _, v in obj.items():
+                if isinstance(v, str) and looks_like_username(v, expected_length):
+                    names.append(v)
+            if not names:
+                for _, v in deep_walk(obj):
+                    if isinstance(v, str) and looks_like_username(v, expected_length):
+                        names.append(v)
+
+            if not names:
+                continue
+
+            ton_price, usd_price = prices_from_marketapp_api_item(obj)
+            if ton_price <= 0 and usd_price <= 0:
+                ton_price, usd_price = extract_prices_from_dict(obj)
+
+            for name in names:
+                add_candidate(name, ton_price, usd_price, obj)
+
+    return sorted(candidates.values(), key=lambda x: candidate_sort_key(x, 1.0))
+
+
 def candidate_sort_key(item: dict, ton_usd_rate: float):
     display_usd = build_display_usd(item, ton_usd_rate, 0.0)
     if display_usd > 0:
@@ -802,10 +871,11 @@ async def fetch_marketapp_api_collection_items(
 
     try:
         async with httpx.AsyncClient(timeout=30) as client:
+            current_limit = 100
             for page_num in range(1, page_limit + 1):
                 params = {
                     "filter_by": "onsale",
-                    "limit": 100,
+                    "limit": current_limit,
                 }
                 if cursor:
                     params["cursor"] = cursor
@@ -819,12 +889,45 @@ async def fetch_marketapp_api_collection_items(
                     resp.raise_for_status()
                 except httpx.HTTPStatusError as e:
                     if e.response.status_code == 400 and items:
-                        print(
-                            "DEBUG API COLLECTION STOP "
-                            f"label={label} page={page_num} status=400 total={len(items)}"
-                        )
-                        break
-                    raise
+                        recovered = None
+                        for retry_limit in [50, 25, 10, 1]:
+                            retry_params = dict(params)
+                            retry_params["limit"] = retry_limit
+                            try:
+                                retry_resp = await client.get(
+                                    f"{MARKETAPP_API_BASE}/v1/nfts/collections/{collection_address}/",
+                                    params=retry_params,
+                                    headers=headers,
+                                )
+                                retry_resp.raise_for_status()
+                                recovered = retry_resp
+                                current_limit = retry_limit
+                                print(
+                                    "DEBUG API COLLECTION RECOVER "
+                                    f"label={label} page={page_num} limit={retry_limit} total={len(items)}"
+                                )
+                                break
+                            except Exception:
+                                continue
+
+                        if recovered is not None:
+                            resp = recovered
+                        else:
+                            print(
+                                "DEBUG API COLLECTION CAP "
+                                f"label={label} page={page_num} status=400 total={len(items)}"
+                            )
+                            MARKETAPP_API_COLLECTION_CAPS.add(cache_key)
+                            break
+                    else:
+                        raise
+
+                if resp.status_code == 400 and items:
+                    print(
+                        "DEBUG API COLLECTION STOP "
+                        f"label={label} page={page_num} status=400 total={len(items)}"
+                    )
+                    break
                 payload = resp.json()
 
                 page_items = payload.get("items") or []
@@ -839,7 +942,7 @@ async def fetch_marketapp_api_collection_items(
 
                 print(
                     "DEBUG API COLLECTION "
-                    f"label={label} page={page_num} items={len(page_items)} total={len(items)} "
+                    f"label={label} page={page_num} limit={current_limit} items={len(page_items)} total={len(items)} "
                     f"has_cursor={bool(cursor)} min_gram={page_min_gram:.2f}"
                 )
 
@@ -857,6 +960,143 @@ async def fetch_marketapp_api_collection_items(
     MARKETAPP_API_COLLECTION_CACHE[cache_key] = items
     return items
 
+
+async def fetch_marketapp_browser_username_items(browser, base_url: str, length_value: int, seconds_budget: int):
+    if not base_url or seconds_budget <= 0:
+        return []
+
+    deadline = asyncio.get_running_loop().time() + seconds_budget
+    context = await browser.new_context(
+        ignore_https_errors=True,
+        locale="en-US",
+        user_agent=MARKET_USER_AGENT,
+    )
+    page = await context.new_page()
+    candidates = {}
+    response_count = 0
+
+    async def collect_response(response):
+        nonlocal response_count
+        try:
+            ctype = (response.headers.get("content-type") or "").lower()
+            if "application/json" not in ctype:
+                return
+            body = await response.text()
+            if not body or body[0] not in "{[":
+                return
+            payload = json.loads(body)
+            response_count += 1
+            for item in parse_candidates_from_json_payload(payload, length_value):
+                gram_price = item.get("ton_price", 0.0)
+                if item.get("is_restricted"):
+                    continue
+                if gram_price > USERNAME_API_PRICE_LIMIT_GRAM:
+                    continue
+                key = item["name"].lower()
+                old = candidates.get(key)
+                if old is None or candidate_sort_key(item, 1.0) < candidate_sort_key(old, 1.0):
+                    candidates[key] = item
+        except Exception:
+            return
+
+    page.on("response", lambda response: asyncio.create_task(collect_response(response)))
+
+    try:
+        await page.goto(base_url, wait_until="domcontentloaded", timeout=30000)
+        await page.wait_for_timeout(3000)
+
+        stable_rounds = 0
+        last_count = 0
+        for scroll_num in range(1, USERNAME_BROWSER_SCROLLS + 1):
+            if asyncio.get_running_loop().time() >= deadline:
+                break
+
+            await page.mouse.wheel(0, 5000)
+            await page.wait_for_timeout(1200)
+
+            count = len(candidates)
+            if count == last_count:
+                stable_rounds += 1
+            else:
+                stable_rounds = 0
+                last_count = count
+
+            if stable_rounds >= 8:
+                break
+
+        await page.wait_for_timeout(1500)
+    except Exception as e:
+        print(f"DEBUG BROWSER USERNAMES FAIL length={length_value} error={type(e).__name__}: {e}")
+    finally:
+        await context.close()
+
+    result = sorted(candidates.values(), key=lambda x: candidate_sort_key(x, 1.0))
+    print(
+        "DEBUG BROWSER USERNAMES "
+        f"length={length_value} responses={response_count} candidates={len(result)}"
+    )
+    return result
+
+
+def select_username_items(api_items, browser_items, length_value: int):
+    rules = USERNAME_RULES[length_value]
+    extra_count = USERNAME_EXTRA_COUNT[length_value]
+
+    candidates_by_name = {}
+    for raw in api_items or []:
+        item = username_candidate_from_api_item(raw, length_value)
+        gram_price = gram_price_from_marketapp_api_item(raw)
+        if (
+            item
+            and not item.get("is_restricted")
+            and (gram_price <= 0 or gram_price <= USERNAME_API_PRICE_LIMIT_GRAM)
+        ):
+            candidates_by_name[item["name"].lower()] = item
+
+    for item in browser_items or []:
+        if item.get("is_restricted"):
+            continue
+        gram_price = item.get("ton_price", 0.0)
+        if gram_price > USERNAME_API_PRICE_LIMIT_GRAM:
+            continue
+        key = item["name"].lower()
+        old = candidates_by_name.get(key)
+        if old is None or candidate_sort_key(item, 1.0) < candidate_sort_key(old, 1.0):
+            candidates_by_name[key] = item
+
+    api_candidates = list(candidates_by_name.values())
+    selected = []
+    used = set()
+
+    for rule_name, run_len, kind in rules:
+        matches = [
+            item
+            for item in api_candidates
+            if item["name"].lower() not in used
+            and rule_match(username_clean(item["name"]), rule_name, run_len, kind)
+        ]
+        chosen = min(matches, key=lambda x: candidate_sort_key(x, 1.0), default=None)
+        if chosen is None:
+            continue
+
+        chosen["matched_rule"] = rule_name
+        used.add(chosen["name"].lower())
+        selected.append(chosen)
+
+    if extra_count > 0:
+        extras = [
+            item
+            for item in sorted(api_candidates, key=lambda x: candidate_sort_key(x, 1.0))
+            if item["name"].lower() not in used
+        ]
+        for item in extras:
+            if len(selected) >= len(rules) + extra_count:
+                break
+            item["matched_rule"] = "extra"
+            used.add(item["name"].lower())
+            selected.append(item)
+
+    return selected[: len(rules) + extra_count], len(api_candidates)
 
 def add_or_replace_query(base_url: str, query_value: str) -> str:
     if not base_url:
@@ -1014,61 +1254,39 @@ async def build_username_section(browser, base_url: str, length_value: int):
     last_price = None
 
     if MARKETAPP_API_TOKEN:
+        collection_address = collection_address_from_url(base_url)
+        page_limit = USERNAME_API_MAX_PAGES
+        cache_key = (collection_address, page_limit, USERNAME_API_PRICE_LIMIT_GRAM)
         api_items = await fetch_marketapp_api_collection_items(
-            collection_address_from_url(base_url),
+            collection_address,
             f"usernames-{length_value}",
-            max_pages=USERNAME_API_MAX_PAGES,
+            max_pages=page_limit,
             stop_after_gram_price=USERNAME_API_PRICE_LIMIT_GRAM,
         )
         if api_items is None:
-            print(f"ERROR API USERNAMES length={length_value} unavailable; skip browser fallback")
-            return []
+            print(f"ERROR API USERNAMES length={length_value} unavailable; use browser supplement")
+            api_items = []
 
-        api_candidates = []
-        for raw in api_items:
-            item = username_candidate_from_api_item(raw, length_value)
-            gram_price = gram_price_from_marketapp_api_item(raw)
-            if (
-                item
-                and not item.get("is_restricted")
-                and (gram_price <= 0 or gram_price <= USERNAME_API_PRICE_LIMIT_GRAM)
-            ):
-                api_candidates.append(item)
+        browser_items = []
+        if cache_key in MARKETAPP_API_COLLECTION_CAPS:
+            browser_budget = max(30, USERNAME_DEEP_FETCH_SECONDS // 3)
+            browser_items = await fetch_marketapp_browser_username_items(
+                browser,
+                base_url,
+                length_value,
+                browser_budget,
+            )
 
-        for rule_name, run_len, kind in rules:
-            matches = [
-                item
-                for item in api_candidates
-                if item["name"].lower() not in used
-                and rule_match(username_clean(item["name"]), rule_name, run_len, kind)
-            ]
-            chosen = min(matches, key=lambda x: candidate_sort_key(x, 1.0), default=None)
-            if chosen is None:
-                continue
-
-            chosen["matched_rule"] = rule_name
-            used.add(chosen["name"].lower())
-            selected.append(chosen)
-
-        if extra_count > 0:
-            extras = [
-                item
-                for item in sorted(api_candidates, key=lambda x: candidate_sort_key(x, 1.0))
-                if item["name"].lower() not in used
-            ]
-            for item in extras:
-                if len(selected) >= len(rules) + extra_count:
-                    break
-                item["matched_rule"] = "extra"
-                used.add(item["name"].lower())
-                selected.append(item)
+        selected, candidate_count = select_username_items(api_items, browser_items, length_value)
 
         print(
             "DEBUG API USERNAMES "
-            f"length={length_value} candidates={len(api_candidates)} selected={len(selected)} "
-            f"price_limit_gram={USERNAME_API_PRICE_LIMIT_GRAM:.0f}"
+            f"length={length_value} api_items={len(api_items)} browser_items={len(browser_items)} "
+            f"candidates={candidate_count} selected={len(selected)} "
+            f"price_limit_gram={USERNAME_API_PRICE_LIMIT_GRAM:.0f} "
+            f"official_api_cursor_cap={cache_key in MARKETAPP_API_COLLECTION_CAPS}"
         )
-        return selected[: len(rules) + extra_count]
+        return selected
 
     for rule_name, run_len, kind in rules:
         chosen = await fetch_best_match_by_query(browser, base_url, length_value, rule_name, run_len, kind)

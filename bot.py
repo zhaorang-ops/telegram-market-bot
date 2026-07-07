@@ -123,7 +123,7 @@ USERNAME_EXTRA_COUNT = {
 }
 
 USERNAME_QUERY_ALPHA_CHARS = "abcdefghijklmnopqrstuvwxyz"
-USERNAME_QUERY_DIGIT_CHARS = ["6", "8", "9", "0", "1", "2", "3", "4", "5", "7"]
+USERNAME_QUERY_DIGIT_CHARS = "0123456789"
 
 
 def build_promo_reply_markup():
@@ -1119,6 +1119,85 @@ def select_username_items(api_items, browser_items, length_value: int):
 
     return selected[: len(rules) + extra_count], len(api_candidates)
 
+
+def valid_username_candidate(item: dict) -> bool:
+    if not item:
+        return False
+    if item.get("is_restricted"):
+        return False
+    gram_price = item.get("ton_price", 0.0)
+    return gram_price <= 0 or gram_price <= USERNAME_API_PRICE_LIMIT_GRAM
+
+
+def merge_username_candidates(target: dict, items):
+    for item in items or []:
+        if not valid_username_candidate(item):
+            continue
+        key = item["name"].lower()
+        old = target.get(key)
+        if old is None or candidate_sort_key(item, 1.0) < candidate_sort_key(old, 1.0):
+            target[key] = item
+
+
+def api_username_candidates(api_items, length_value: int):
+    candidates = {}
+    for raw in api_items or []:
+        item = username_candidate_from_api_item(raw, length_value)
+        merge_username_candidates(candidates, [item])
+    return candidates
+
+
+def pick_rule_matches(candidates: dict, rules, selected=None, used=None, only_rules=None):
+    selected = selected or []
+    used = used or set()
+    matched = set()
+    allowed_rules = set(only_rules) if only_rules is not None else None
+
+    for rule_name, run_len, kind in rules:
+        if allowed_rules is not None and rule_name not in allowed_rules:
+            continue
+
+        matches = [
+            item
+            for item in candidates.values()
+            if item["name"].lower() not in used
+            and rule_match(username_clean(item["name"]), rule_name, run_len, kind)
+        ]
+        chosen = min(matches, key=lambda x: candidate_sort_key(x, 1.0), default=None)
+        if chosen is None:
+            continue
+
+        chosen["matched_rule"] = rule_name
+        used.add(chosen["name"].lower())
+        selected.append(chosen)
+        matched.add(rule_name)
+
+    return selected, used, matched
+
+
+def add_extra_username_items(candidates: dict, selected, used, target_count: int):
+    for item in sorted(candidates.values(), key=lambda x: candidate_sort_key(x, 1.0)):
+        if len(selected) >= target_count:
+            break
+        key = item["name"].lower()
+        if key in used:
+            continue
+        item["matched_rule"] = "extra"
+        used.add(key)
+        selected.append(item)
+    return selected
+
+
+def query_values_for_rule(rule_name: str, run_len, kind: str):
+    if kind == "alpha":
+        return [ch * run_len for ch in USERNAME_QUERY_ALPHA_CHARS]
+    if kind == "digit":
+        return [ch * run_len for ch in USERNAME_QUERY_DIGIT_CHARS]
+    if kind == "fixed":
+        return [rule_name]
+    return []
+
+
 def add_or_replace_query(base_url: str, query_value: str) -> str:
     if not base_url:
         return ""
@@ -1184,7 +1263,76 @@ async def extract_first_row_from_page(page, expected_length: int):
     return None
 
 
-async def fetch_query_result(browser, url: str, expected_length: int):
+async def extract_username_candidates_from_page(page, expected_length: int):
+    candidates = {}
+    row_locator = page.locator("table tbody tr")
+    count = await row_locator.count()
+    if count == 0:
+        row_locator = page.locator("tr")
+        count = await row_locator.count()
+
+    for i in range(count):
+        row = row_locator.nth(i)
+        try:
+            text = await row.inner_text()
+        except Exception:
+            continue
+
+        item = parse_username_candidate_from_text(text, expected_length)
+        merge_username_candidates(candidates, [item])
+
+    return sorted(candidates.values(), key=lambda x: candidate_sort_key(x, 1.0))
+
+
+def parse_username_candidate_from_text(text: str, expected_length: int):
+    if not text or "@" not in text:
+        return None
+
+    name_match = re.search(r"@[A-Za-z0-9_]{4,32}", text)
+    if not name_match:
+        return None
+
+    name = name_match.group(0)
+    if len(name.lstrip("@")) != expected_length:
+        return None
+
+    usd_price = extract_usd_from_text(text)
+    ton_price = 0.0
+
+    if usd_price <= 0:
+        gram_match = re.search(r"([\d,]+(?:\.\d+)?)\s*GRAM", text, re.I)
+        if gram_match:
+            ton_price = to_float(gram_match.group(1), 0.0)
+
+    if usd_price <= 0 and ton_price <= 0:
+        price_match = re.search(r"鈻絓s*([\d,]+(?:\.\d+)?)", text)
+        if price_match:
+            ton_price = to_float(price_match.group(1), 0.0)
+
+    if usd_price <= 0 and ton_price <= 0:
+        text_wo_name = text.replace(name, " ")
+        ton_candidates = re.findall(r"(?<!\$)\b\d+(?:,\d{3})*(?:\.\d+)?\b", text_wo_name)
+        for raw in ton_candidates:
+            val = to_float(raw, 0.0)
+            if val > 0:
+                ton_price = val
+                break
+
+    if usd_price <= 0 and ton_price <= 0:
+        return None
+
+    return {
+        "name": name,
+        "length": expected_length,
+        "ton_price": ton_price,
+        "usd_price": usd_price,
+        "is_on_sale": True,
+        "is_restricted": "restricted" in text.lower(),
+        "raw_text": text,
+    }
+
+
+async def fetch_query_candidates(browser, url: str, expected_length: int):
     context = await browser.new_context(
         ignore_https_errors=True,
         locale="en-US",
@@ -1203,8 +1351,8 @@ async def fetch_query_result(browser, url: str, expected_length: int):
         await page.goto(url, wait_until="domcontentloaded", timeout=30000)
         await page.wait_for_timeout(3000)
 
-        json_candidates = []
-        for response in responses[-20:]:
+        candidates = {}
+        for response in responses[-50:]:
             try:
                 ctype = (response.headers.get("content-type") or "").lower()
                 if "application/json" not in ctype:
@@ -1215,22 +1363,30 @@ async def fetch_query_result(browser, url: str, expected_length: int):
                     continue
 
                 payload = json.loads(body)
-                json_candidates.extend(parse_candidates_from_json_payload(payload, expected_length))
+                merge_username_candidates(
+                    candidates,
+                    parse_candidates_from_json_payload(payload, expected_length),
+                )
             except Exception:
                 continue
-
-        if json_candidates:
-            return json_candidates[0]
 
         try:
             await page.wait_for_selector("tr", timeout=10000)
         except PlaywrightTimeoutError:
             pass
 
-        result = await extract_first_row_from_page(page, expected_length)
-        return result
+        merge_username_candidates(
+            candidates,
+            await extract_username_candidates_from_page(page, expected_length),
+        )
+        return sorted(candidates.values(), key=lambda x: candidate_sort_key(x, 1.0))
     finally:
         await context.close()
+
+
+async def fetch_query_result(browser, url: str, expected_length: int):
+    candidates = await fetch_query_candidates(browser, url, expected_length)
+    return candidates[0] if candidates else None
 
 
 async def fetch_best_match_by_query(browser, base_url: str, length_value: int, rule_name: str, run_len, kind: str):
@@ -1288,26 +1444,57 @@ async def build_username_section(browser, base_url: str, length_value: int):
             print(f"ERROR API USERNAMES length={length_value} unavailable; use browser supplement")
             api_items = []
 
-        browser_items = []
-        if cache_key in MARKETAPP_API_COLLECTION_CAPS:
-            browser_budget = max(30, USERNAME_DEEP_FETCH_SECONDS // 3)
-            browser_items = await fetch_marketapp_browser_username_items(
-                browser,
-                base_url,
-                length_value,
-                browser_budget,
-            )
+        api_candidates = api_username_candidates(api_items, length_value)
+        selected, used, api_matched = pick_rule_matches(api_candidates, rules)
+        missing_rules = [
+            rule
+            for rule in rules
+            if rule[0] not in api_matched
+        ]
 
-        selected, candidate_count = select_username_items(api_items, browser_items, length_value)
+        query_pool = {}
+        query_count = 0
+        for rule_name, run_len, kind in missing_rules:
+            for q in query_values_for_rule(rule_name, run_len, kind):
+                query_count += 1
+                url = add_or_replace_query(base_url, q)
+                try:
+                    query_items = await fetch_query_candidates(browser, url, length_value)
+                except Exception as e:
+                    print(
+                        "DEBUG QUERY POOL FAIL "
+                        f"length={length_value} rule={rule_name} query={q} error={type(e).__name__}: {e}"
+                    )
+                    query_items = []
+                merge_username_candidates(query_pool, query_items)
+
+        selected, used, query_matched = pick_rule_matches(
+            query_pool,
+            rules,
+            selected=selected,
+            used=used,
+            only_rules={rule[0] for rule in missing_rules},
+        )
+
+        all_candidates = dict(api_candidates)
+        merge_username_candidates(all_candidates, query_pool.values())
+        selected = add_extra_username_items(
+            all_candidates,
+            selected,
+            used,
+            len(rules) + extra_count,
+        )
 
         print(
-            "DEBUG API USERNAMES "
-            f"length={length_value} api_items={len(api_items)} browser_items={len(browser_items)} "
-            f"candidates={candidate_count} selected={len(selected)} "
+            "DEBUG USERNAMES "
+            f"length={length_value} api_items={len(api_items)} api_candidates={len(api_candidates)} "
+            f"api_rules={len(api_matched)} missing_rules={len(missing_rules)} "
+            f"query_requests={query_count} query_pool={len(query_pool)} query_rules={len(query_matched)} "
+            f"final_selected={len(selected)} "
             f"price_limit_gram={USERNAME_API_PRICE_LIMIT_GRAM:.0f} "
             f"official_api_cursor_cap={cache_key in MARKETAPP_API_COLLECTION_CAPS}"
         )
-        return selected
+        return selected[: len(rules) + extra_count]
 
     for rule_name, run_len, kind in rules:
         chosen = await fetch_best_match_by_query(browser, base_url, length_value, rule_name, run_len, kind)

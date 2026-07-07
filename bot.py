@@ -1002,29 +1002,50 @@ async def fetch_marketapp_browser_username_items(browser, base_url: str, length_
     page.on("response", lambda response: asyncio.create_task(collect_response(response)))
 
     try:
-        await page.goto(base_url, wait_until="domcontentloaded", timeout=30000)
-        await page.wait_for_timeout(3000)
+        urls = [base_url]
+        if "marketapp.org" in base_url:
+            urls.append(base_url.replace("marketapp.org", "marketapp.ws"))
+        elif "marketapp.ws" in base_url:
+            urls.append(base_url.replace("marketapp.ws", "marketapp.org"))
 
-        stable_rounds = 0
-        last_count = 0
-        for scroll_num in range(1, USERNAME_BROWSER_SCROLLS + 1):
+        loaded = False
+        for url in urls:
             if asyncio.get_running_loop().time() >= deadline:
                 break
-
-            await page.mouse.wheel(0, 5000)
-            await page.wait_for_timeout(1200)
-
-            count = len(candidates)
-            if count == last_count:
-                stable_rounds += 1
-            else:
-                stable_rounds = 0
-                last_count = count
-
-            if stable_rounds >= 8:
+            try:
+                await page.goto(url, wait_until="commit", timeout=30000)
+                loaded = True
                 break
+            except Exception as e:
+                print(f"DEBUG BROWSER USERNAMES GOTO length={length_value} error={type(e).__name__}: {e}")
+                await page.wait_for_timeout(2500)
+                if candidates:
+                    loaded = True
+                    break
 
-        await page.wait_for_timeout(1500)
+        if loaded:
+            await page.wait_for_timeout(3000)
+
+            stable_rounds = 0
+            last_count = 0
+            for scroll_num in range(1, USERNAME_BROWSER_SCROLLS + 1):
+                if asyncio.get_running_loop().time() >= deadline:
+                    break
+
+                await page.mouse.wheel(0, 5000)
+                await page.wait_for_timeout(1200)
+
+                count = len(candidates)
+                if count == last_count:
+                    stable_rounds += 1
+                else:
+                    stable_rounds = 0
+                    last_count = count
+
+                if stable_rounds >= 8:
+                    break
+
+            await page.wait_for_timeout(1500)
     except Exception as e:
         print(f"DEBUG BROWSER USERNAMES FAIL length={length_value} error={type(e).__name__}: {e}")
     finally:

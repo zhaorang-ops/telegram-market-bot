@@ -1281,7 +1281,40 @@ async def extract_username_candidates_from_page(page, expected_length: int):
         item = parse_username_candidate_from_text(text, expected_length)
         merge_username_candidates(candidates, [item])
 
+    try:
+        body_text = await page.locator("body").inner_text(timeout=10000)
+        merge_username_candidates(
+            candidates,
+            parse_username_candidates_from_page_text(body_text, expected_length),
+        )
+    except Exception:
+        pass
+
     return sorted(candidates.values(), key=lambda x: candidate_sort_key(x, 1.0))
+
+
+def parse_username_candidates_from_page_text(text: str, expected_length: int):
+    if not text:
+        return []
+
+    matches = list(re.finditer(r"@[A-Za-z0-9_]{4,32}", text))
+    candidates = []
+
+    for i, match in enumerate(matches):
+        name = match.group(0)
+        if len(name.lstrip("@")) != expected_length:
+            continue
+
+        end = matches[i + 1].start() if i + 1 < len(matches) else len(text)
+        for marker in ["Advanced solution", "NAVIGATION", "COMMUNITY", "Based on TON"]:
+            marker_index = text.find(marker, match.start(), end)
+            if marker_index != -1:
+                end = marker_index
+        item = parse_username_candidate_from_text(text[match.start():end], expected_length)
+        if item:
+            candidates.append(item)
+
+    return candidates
 
 
 def parse_username_candidate_from_text(text: str, expected_length: int):
@@ -1348,7 +1381,29 @@ async def fetch_query_candidates(browser, url: str, expected_length: int):
     page.on("response", on_response)
 
     try:
-        await page.goto(url, wait_until="domcontentloaded", timeout=30000)
+        urls = [url]
+        if "marketapp.org" in url:
+            urls.append(url.replace("marketapp.org", "marketapp.ws"))
+        elif "marketapp.ws" in url:
+            urls.append(url.replace("marketapp.ws", "marketapp.org"))
+
+        last_error = None
+        loaded = False
+        for target_url in urls:
+            for _ in range(2):
+                try:
+                    await page.goto(target_url, wait_until="commit", timeout=30000)
+                    loaded = True
+                    break
+                except Exception as e:
+                    last_error = e
+                    await page.wait_for_timeout(2000)
+                    if responses:
+                        loaded = True
+                        break
+            if loaded:
+                break
+
         await page.wait_for_timeout(3000)
 
         candidates = {}
@@ -1379,7 +1434,20 @@ async def fetch_query_candidates(browser, url: str, expected_length: int):
             candidates,
             await extract_username_candidates_from_page(page, expected_length),
         )
-        return sorted(candidates.values(), key=lambda x: candidate_sort_key(x, 1.0))
+        result = sorted(candidates.values(), key=lambda x: candidate_sort_key(x, 1.0))
+        query_match = re.search(r"[?&]query=([^&]*)", url)
+        query_value = query_match.group(1) if query_match else ""
+        if result:
+            print(
+                "DEBUG QUERY OK "
+                f"length={expected_length} query={query_value} candidates={len(result)}"
+            )
+        elif last_error is not None:
+            print(
+                "DEBUG QUERY EMPTY "
+                f"length={expected_length} query={query_value} error={type(last_error).__name__}"
+            )
+        return result
     finally:
         await context.close()
 

@@ -36,6 +36,7 @@ MARKETAPP_API_COLLECTION_CACHE = {}
 MARKETAPP_API_COLLECTION_CAPS = set()
 USERNAME_DEEP_FETCH_SECONDS = int(os.environ.get("USERNAME_DEEP_FETCH_SECONDS", "540") or "540")
 USERNAME_BROWSER_SCROLLS = int(os.environ.get("USERNAME_BROWSER_SCROLLS", "80") or "80")
+USERNAME_QUERY_CONCURRENCY = int(os.environ.get("USERNAME_QUERY_CONCURRENCY", "6") or "6")
 
 TZ = ZoneInfo(os.environ.get("TZ", "Asia/Shanghai"))
 
@@ -1514,20 +1515,27 @@ async def build_username_section(browser, base_url: str, length_value: int):
         api_candidates = api_username_candidates(api_items, length_value)
 
         query_pool = {}
-        query_count = 0
+        query_jobs = []
         for rule_name, run_len, kind in rules:
             for q in query_values_for_rule(rule_name, run_len, kind):
-                query_count += 1
-                url = add_or_replace_query(base_url, q)
+                query_jobs.append((rule_name, q, add_or_replace_query(base_url, q)))
+
+        sem = asyncio.Semaphore(USERNAME_QUERY_CONCURRENCY)
+
+        async def fetch_query_job(job):
+            rule_name, q, url = job
+            async with sem:
                 try:
-                    query_items = await fetch_query_candidates(browser, url, length_value)
+                    return await fetch_query_candidates(browser, url, length_value)
                 except Exception as e:
                     print(
                         "DEBUG QUERY POOL FAIL "
                         f"length={length_value} rule={rule_name} query={q} error={type(e).__name__}: {e}"
                     )
-                    query_items = []
-                merge_username_candidates(query_pool, query_items)
+                    return []
+
+        for query_items in await asyncio.gather(*(fetch_query_job(job) for job in query_jobs)):
+            merge_username_candidates(query_pool, query_items)
 
         selected, used, api_matched = pick_rule_matches(api_candidates, rules)
         missing_rules = [
@@ -1555,7 +1563,7 @@ async def build_username_section(browser, base_url: str, length_value: int):
         print(
             "DEBUG USERNAMES "
             f"length={length_value} api_items={len(api_items)} api_candidates={len(api_candidates)} "
-            f"query_requests={query_count} query_pool={len(query_pool)} query_rules={len(query_matched)} "
+            f"query_requests={len(query_jobs)} query_pool={len(query_pool)} query_rules={len(query_matched)} "
             f"api_rules={len(api_matched)} missing_rules_after_api={len(missing_rules)} "
             f"final_selected={len(selected)} "
             f"price_limit_gram={USERNAME_API_PRICE_LIMIT_GRAM:.0f} "

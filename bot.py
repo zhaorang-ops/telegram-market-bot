@@ -1437,10 +1437,18 @@ async def fetch_query_candidates(browser, url: str, expected_length: int):
         except PlaywrightTimeoutError:
             pass
 
-        merge_username_candidates(
-            candidates,
-            await extract_username_candidates_from_page(page, expected_length),
-        )
+        try:
+            dom_candidates = await extract_username_candidates_from_page(page, expected_length)
+        except Exception as e:
+            query_match = re.search(r"[?&]query=([^&]*)", url)
+            query_value = query_match.group(1) if query_match else ""
+            print(
+                "DEBUG QUERY DOM SKIP "
+                f"length={expected_length} query={query_value} error={type(e).__name__}"
+            )
+            dom_candidates = []
+
+        merge_username_candidates(candidates, dom_candidates)
         result = sorted(candidates.values(), key=lambda x: candidate_sort_key(x, 1.0))
         query_match = re.search(r"[?&]query=([^&]*)", url)
         query_value = query_match.group(1) if query_match else ""

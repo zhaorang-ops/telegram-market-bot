@@ -1400,20 +1400,20 @@ async def fetch_query_candidates(browser, url: str, expected_length: int):
             loaded = False
             for target_url in urls:
                 try:
-                    await page.goto(target_url, wait_until="commit", timeout=15000)
+                    await page.goto(target_url, wait_until="commit", timeout=10000)
                     loaded = True
                     break
                 except Exception as e:
                     attempt_had_error = True
                     last_error = e
-                    await page.wait_for_timeout(700)
+                    await page.wait_for_timeout(600)
                     if responses:
                         loaded = True
                         break
                 if loaded:
                     break
 
-            await page.wait_for_timeout(1200 if loaded else 700)
+            await page.wait_for_timeout(1200 if loaded else 600)
 
             for response in responses[-80:]:
                 try:
@@ -1438,7 +1438,7 @@ async def fetch_query_candidates(browser, url: str, expected_length: int):
                     continue
 
             try:
-                await page.wait_for_selector("tr", timeout=2500)
+                await page.wait_for_selector("tr", timeout=2000)
             except PlaywrightTimeoutError:
                 pass
 
@@ -1464,7 +1464,7 @@ async def fetch_query_candidates(browser, url: str, expected_length: int):
             return result
 
         if attempt < 2 and attempt_had_error:
-            await asyncio.sleep(0.5)
+            await asyncio.sleep(0.4)
         else:
             break
 

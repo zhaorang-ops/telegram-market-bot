@@ -1390,21 +1390,20 @@ async def fetch_query_candidates(browser, url: str, expected_length: int):
         last_error = None
         loaded = False
         for target_url in urls:
-            for _ in range(2):
-                try:
-                    await page.goto(target_url, wait_until="commit", timeout=30000)
+            try:
+                await page.goto(target_url, wait_until="commit", timeout=15000)
+                loaded = True
+                break
+            except Exception as e:
+                last_error = e
+                await page.wait_for_timeout(500)
+                if responses:
                     loaded = True
                     break
-                except Exception as e:
-                    last_error = e
-                    await page.wait_for_timeout(2000)
-                    if responses:
-                        loaded = True
-                        break
             if loaded:
                 break
 
-        await page.wait_for_timeout(3000)
+        await page.wait_for_timeout(1000)
 
         candidates = {}
         for response in responses[-50:]:
@@ -1426,7 +1425,7 @@ async def fetch_query_candidates(browser, url: str, expected_length: int):
                 continue
 
         try:
-            await page.wait_for_selector("tr", timeout=10000)
+            await page.wait_for_selector("tr", timeout=2500)
         except PlaywrightTimeoutError:
             pass
 

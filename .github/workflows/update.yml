@@ -37,6 +37,7 @@ jobs:
       TZ: "Asia/Shanghai"
       TON_USD_OVERRIDE: ""
       MARKET_BROWSER: "chromium"
+      USERNAME_QUERY_CONCURRENCY: "20"
 
     steps:
       - name: Checkout

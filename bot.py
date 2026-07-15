@@ -1462,14 +1462,14 @@ async def build_username_section(browser, base_url: str, length_value: int):
                     query_items = []
                 merge_username_candidates(query_pool, query_items)
 
-        selected, used, query_matched = pick_rule_matches(query_pool, rules)
+        selected, used, api_matched = pick_rule_matches(api_candidates, rules)
         missing_rules = [
             rule
             for rule in rules
-            if rule[0] not in query_matched
+            if rule[0] not in api_matched
         ]
-        selected, used, api_matched = pick_rule_matches(
-            api_candidates,
+        selected, used, query_matched = pick_rule_matches(
+            query_pool,
             rules,
             selected=selected,
             used=used,
@@ -1489,7 +1489,7 @@ async def build_username_section(browser, base_url: str, length_value: int):
             "DEBUG USERNAMES "
             f"length={length_value} api_items={len(api_items)} api_candidates={len(api_candidates)} "
             f"query_requests={query_count} query_pool={len(query_pool)} query_rules={len(query_matched)} "
-            f"api_rules={len(api_matched)} missing_rules_after_query={len(missing_rules)} "
+            f"api_rules={len(api_matched)} missing_rules_after_api={len(missing_rules)} "
             f"final_selected={len(selected)} "
             f"price_limit_gram={USERNAME_API_PRICE_LIMIT_GRAM:.0f} "
             f"official_api_cursor_cap={cache_key in MARKETAPP_API_COLLECTION_CAPS}"

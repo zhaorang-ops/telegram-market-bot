@@ -1389,6 +1389,7 @@ async def fetch_query_candidates(browser, url: str, expected_length: int):
         )
         page = await context.new_page()
         responses = []
+        attempt_had_error = False
 
         def on_response(response):
             responses.append(response)
@@ -1403,6 +1404,7 @@ async def fetch_query_candidates(browser, url: str, expected_length: int):
                     loaded = True
                     break
                 except Exception as e:
+                    attempt_had_error = True
                     last_error = e
                     await page.wait_for_timeout(700)
                     if responses:
@@ -1461,8 +1463,10 @@ async def fetch_query_candidates(browser, url: str, expected_length: int):
             )
             return result
 
-        if attempt < 2:
+        if attempt < 2 and attempt_had_error:
             await asyncio.sleep(0.5)
+        else:
+            break
 
     if last_error is not None:
         print(

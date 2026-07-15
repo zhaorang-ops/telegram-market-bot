@@ -1370,101 +1370,106 @@ def parse_username_candidate_from_text(text: str, expected_length: int):
 
 
 async def fetch_query_candidates(browser, url: str, expected_length: int):
-    context = await browser.new_context(
-        ignore_https_errors=True,
-        locale="en-US",
-        user_agent=MARKET_USER_AGENT,
-    )
-    page = await context.new_page()
+    query_match = re.search(r"[?&]query=([^&]*)", url)
+    query_value = query_match.group(1) if query_match else ""
+    urls = [url]
+    if "marketapp.org" in url:
+        urls.append(url.replace("marketapp.org", "marketapp.ws"))
+    elif "marketapp.ws" in url:
+        urls.append(url.replace("marketapp.ws", "marketapp.org"))
 
-    responses = []
+    candidates = {}
+    last_error = None
 
-    def on_response(response):
-        responses.append(response)
+    for attempt in range(1, 3):
+        context = await browser.new_context(
+            ignore_https_errors=True,
+            locale="en-US",
+            user_agent=MARKET_USER_AGENT,
+        )
+        page = await context.new_page()
+        responses = []
 
-    page.on("response", on_response)
+        def on_response(response):
+            responses.append(response)
 
-    try:
-        urls = [url]
-        if "marketapp.org" in url:
-            urls.append(url.replace("marketapp.org", "marketapp.ws"))
-        elif "marketapp.ws" in url:
-            urls.append(url.replace("marketapp.ws", "marketapp.org"))
+        page.on("response", on_response)
 
-        last_error = None
-        loaded = False
-        for target_url in urls:
-            try:
-                await page.goto(target_url, wait_until="commit", timeout=15000)
-                loaded = True
-                break
-            except Exception as e:
-                last_error = e
-                await page.wait_for_timeout(500)
-                if responses:
+        try:
+            loaded = False
+            for target_url in urls:
+                try:
+                    await page.goto(target_url, wait_until="commit", timeout=15000)
                     loaded = True
                     break
-            if loaded:
-                break
+                except Exception as e:
+                    last_error = e
+                    await page.wait_for_timeout(700)
+                    if responses:
+                        loaded = True
+                        break
+                if loaded:
+                    break
 
-        await page.wait_for_timeout(1000)
+            await page.wait_for_timeout(1200 if loaded else 700)
 
-        candidates = {}
-        for response in responses[-50:]:
-            try:
-                ctype = (response.headers.get("content-type") or "").lower()
-                body = await response.text()
-                if not body:
+            for response in responses[-80:]:
+                try:
+                    ctype = (response.headers.get("content-type") or "").lower()
+                    body = await response.text()
+                    if not body:
+                        continue
+
+                    if "application/json" in ctype and body[0] in "{[":
+                        payload = json.loads(body)
+                        merge_username_candidates(
+                            candidates,
+                            parse_candidates_from_json_payload(payload, expected_length),
+                        )
+                    elif "text/html" in ctype and "@" in body:
+                        text = unescape(re.sub(r"<[^>]+>", "\n", body))
+                        merge_username_candidates(
+                            candidates,
+                            parse_username_candidates_from_page_text(text, expected_length),
+                        )
+                except Exception:
                     continue
 
-                if "application/json" in ctype and body[0] in "{[":
-                    payload = json.loads(body)
-                    merge_username_candidates(
-                        candidates,
-                        parse_candidates_from_json_payload(payload, expected_length),
-                    )
-                elif "text/html" in ctype and "@" in body:
-                    text = unescape(re.sub(r"<[^>]+>", "\n", body))
-                    merge_username_candidates(
-                        candidates,
-                        parse_username_candidates_from_page_text(text, expected_length),
-                    )
-            except Exception:
-                continue
+            try:
+                await page.wait_for_selector("tr", timeout=2500)
+            except PlaywrightTimeoutError:
+                pass
 
-        try:
-            await page.wait_for_selector("tr", timeout=2500)
-        except PlaywrightTimeoutError:
-            pass
+            try:
+                dom_candidates = await extract_username_candidates_from_page(page, expected_length)
+            except Exception as e:
+                print(
+                    "DEBUG QUERY DOM SKIP "
+                    f"length={expected_length} query={query_value} attempt={attempt} error={type(e).__name__}"
+                )
+                dom_candidates = []
 
-        try:
-            dom_candidates = await extract_username_candidates_from_page(page, expected_length)
-        except Exception as e:
-            query_match = re.search(r"[?&]query=([^&]*)", url)
-            query_value = query_match.group(1) if query_match else ""
-            print(
-                "DEBUG QUERY DOM SKIP "
-                f"length={expected_length} query={query_value} error={type(e).__name__}"
-            )
-            dom_candidates = []
+            merge_username_candidates(candidates, dom_candidates)
+        finally:
+            await context.close()
 
-        merge_username_candidates(candidates, dom_candidates)
-        result = sorted(candidates.values(), key=lambda x: candidate_sort_key(x, 1.0))
-        query_match = re.search(r"[?&]query=([^&]*)", url)
-        query_value = query_match.group(1) if query_match else ""
-        if result:
+        if candidates:
+            result = sorted(candidates.values(), key=lambda x: candidate_sort_key(x, 1.0))
             print(
                 "DEBUG QUERY OK "
-                f"length={expected_length} query={query_value} candidates={len(result)}"
+                f"length={expected_length} query={query_value} attempt={attempt} candidates={len(result)}"
             )
-        elif last_error is not None:
-            print(
-                "DEBUG QUERY EMPTY "
-                f"length={expected_length} query={query_value} error={type(last_error).__name__}"
-            )
-        return result
-    finally:
-        await context.close()
+            return result
+
+        if attempt < 2:
+            await asyncio.sleep(0.5)
+
+    if last_error is not None:
+        print(
+            "DEBUG QUERY EMPTY "
+            f"length={expected_length} query={query_value} error={type(last_error).__name__}"
+        )
+    return []
 
 
 async def fetch_query_result(browser, url: str, expected_length: int):

@@ -1,4 +1,5 @@
 import asyncio
+from html import unescape
 import json
 import os
 import platform
@@ -1321,6 +1322,8 @@ def parse_username_candidates_from_page_text(text: str, expected_length: int):
 def parse_username_candidate_from_text(text: str, expected_length: int):
     if not text or "@" not in text:
         return None
+    if "on sale" not in text.lower():
+        return None
 
     name_match = re.search(r"@[A-Za-z0-9_]{4,32}", text)
     if not name_match:
@@ -1410,18 +1413,22 @@ async def fetch_query_candidates(browser, url: str, expected_length: int):
         for response in responses[-50:]:
             try:
                 ctype = (response.headers.get("content-type") or "").lower()
-                if "application/json" not in ctype:
-                    continue
-
                 body = await response.text()
-                if not body or body[0] not in "{[":
+                if not body:
                     continue
 
-                payload = json.loads(body)
-                merge_username_candidates(
-                    candidates,
-                    parse_candidates_from_json_payload(payload, expected_length),
-                )
+                if "application/json" in ctype and body[0] in "{[":
+                    payload = json.loads(body)
+                    merge_username_candidates(
+                        candidates,
+                        parse_candidates_from_json_payload(payload, expected_length),
+                    )
+                elif "text/html" in ctype and "@" in body:
+                    text = unescape(re.sub(r"<[^>]+>", "\n", body))
+                    merge_username_candidates(
+                        candidates,
+                        parse_username_candidates_from_page_text(text, expected_length),
+                    )
             except Exception:
                 continue
 

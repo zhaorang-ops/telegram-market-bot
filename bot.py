@@ -2023,7 +2023,16 @@ async def update_online_only():
             finally:
                 await browser.close()
 
-    numbers_text = build_numbers_message(number_floor, ton_usd_rate) if NUMBERS_URL else None
+    has_number_data = bool(number_floor.get("has4") or number_floor.get("no4"))
+    numbers_text = (
+        build_numbers_message(number_floor, ton_usd_rate)
+        if NUMBERS_URL and has_number_data
+        else None
+    )
+    numbers_update_error = None
+    if NUMBERS_URL and not has_number_data:
+        numbers_update_error = "Number sources returned no data; retained the existing Telegram message"
+        print(f"ERROR: {numbers_update_error}")
     promo_text = build_promo_message_html()
     promo_reply_markup = build_promo_reply_markup()
 
@@ -2046,6 +2055,8 @@ async def update_online_only():
         reply_markup=promo_reply_markup,
     )
 
+    if numbers_update_error:
+        raise RuntimeError(numbers_update_error)
 
 
 async def main():

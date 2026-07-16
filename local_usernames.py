@@ -30,7 +30,7 @@ import bot  # noqa: E402
 
 UPDATE_LOCK = asyncio.Lock()
 COMMAND = os.environ.get("LOCAL_USERNAME_COMMAND", "/update_usernames").strip().lower()
-COMMAND_CHAT_ID = os.environ.get("LOCAL_COMMAND_CHAT_ID", bot.USERNAMES_CHAT_ID).strip()
+COMMAND_CHAT_ID = os.environ.get("LOCAL_COMMAND_CHAT_ID", "").strip() or bot.USERNAMES_CHAT_ID
 
 
 async def update_usernames():

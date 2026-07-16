@@ -40,8 +40,21 @@ async def update_usernames():
     async with UPDATE_LOCK:
         print("LOCAL USERNAMES update started")
         await bot.update_usernames_only()
+        await send_completion_message()
         print("LOCAL USERNAMES update completed")
         return True
+
+
+async def send_completion_message():
+    data = await bot.telegram_api(
+        "sendMessage",
+        {
+            "chat_id": COMMAND_CHAT_ID,
+            "text": f"用户名更新完成\n可用指令：{COMMAND}",
+        },
+    )
+    if not data.get("ok"):
+        raise RuntimeError("Telegram completion message failed")
 
 
 def read_offset():

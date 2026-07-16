@@ -12,12 +12,12 @@ import httpx
 from playwright.async_api import async_playwright, TimeoutError as PlaywrightTimeoutError
 
 
-BOT_TOKEN = os.environ["BOT_TOKEN"].strip()
+BOT_TOKEN = os.environ.get("BOT_TOKEN", "").strip()
 
-USERNAMES_CHAT_ID = os.environ["USERNAMES_CHAT_ID"].strip()
+USERNAMES_CHAT_ID = os.environ.get("USERNAMES_CHAT_ID", "").strip()
 USERNAMES_MESSAGE_ID = int(os.environ.get("USERNAMES_MESSAGE_ID", "0") or "0")
 
-NUMBERS_CHAT_ID = os.environ["NUMBERS_CHAT_ID"].strip()
+NUMBERS_CHAT_ID = os.environ.get("NUMBERS_CHAT_ID", "").strip()
 NUMBERS_MESSAGE_ID = int(os.environ.get("NUMBERS_MESSAGE_ID", "0") or "0")
 
 PROMO_CHAT_ID = (os.environ.get("PROMO_CHAT_ID", "").strip() or NUMBERS_CHAT_ID)
@@ -54,6 +54,7 @@ NUMBER_ADD_USD = {
 NUMBER_ITEMS_PER_GROUP = 5
 NUMBERS_PAGE_ATTEMPTS = int(os.environ.get("NUMBERS_PAGE_ATTEMPTS", "5") or "5")
 MARKET_BROWSER = os.environ.get("MARKET_BROWSER", "chromium").strip().lower()
+RUN_MODE = os.environ.get("RUN_MODE", "full").strip().lower()
 MARKET_USER_AGENT = (
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
     "AppleWebKit/537.36 (KHTML, like Gecko) "
@@ -1967,7 +1968,42 @@ async def update_required_message(chat_id: str, message_id, text: str, label: st
     return message
 
 
-async def main():
+async def launch_market_browser(playwright):
+    if MARKET_BROWSER == "firefox":
+        return await playwright.firefox.launch(headless=True)
+    return await playwright.chromium.launch(headless=True, args=CHROMIUM_ARGS)
+
+
+async def update_usernames_only():
+    if not all((BOT_TOKEN, USERNAMES_CHAT_ID, USERNAMES_MESSAGE_ID)):
+        raise RuntimeError("Local username Telegram settings are incomplete")
+    if not all((USERNAMES_5_URL, USERNAMES_6_URL, USERNAMES_7_URL)):
+        raise RuntimeError("Local username Marketapp URLs are incomplete")
+
+    ton_usd_rate = await fetch_ton_usd_rate()
+    async with async_playwright() as p:
+        browser = await launch_market_browser(p)
+        try:
+            section_5 = await build_username_section(browser, USERNAMES_5_URL, 5)
+            section_6 = await build_username_section(browser, USERNAMES_6_URL, 6)
+            section_7 = await build_username_section(browser, USERNAMES_7_URL, 7)
+        finally:
+            await browser.close()
+
+    usernames_text = build_usernames_message(section_5, section_6, section_7, ton_usd_rate)
+    await verify_telegram_bot()
+    update_error = await update_required_message(
+        USERNAMES_CHAT_ID,
+        USERNAMES_MESSAGE_ID,
+        usernames_text,
+        "USERNAMES_MESSAGE_ID",
+        parse_mode="HTML",
+    )
+    if update_error:
+        raise RuntimeError(update_error)
+
+
+async def update_online_only():
     ton_usd_rate = await fetch_ton_usd_rate()
     print(
         "DEBUG RUNTIME "
@@ -1978,35 +2014,20 @@ async def main():
         f"numbers_attempts={NUMBERS_PAGE_ATTEMPTS}"
     )
 
-    async with async_playwright() as p:
-        if MARKET_BROWSER == "firefox":
-            browser = await p.firefox.launch(headless=True)
-        else:
-            browser = await p.chromium.launch(headless=True, args=CHROMIUM_ARGS)
+    number_floor = {"has4": None, "no4": None}
+    if NUMBERS_URL:
+        async with async_playwright() as p:
+            browser = await launch_market_browser(p)
+            try:
+                number_floor = await fetch_numbers_floor(browser, NUMBERS_URL, ton_usd_rate)
+            finally:
+                await browser.close()
 
-        try:
-            section_5 = await build_username_section(browser, USERNAMES_5_URL, 5) if USERNAMES_5_URL else []
-            section_6 = await build_username_section(browser, USERNAMES_6_URL, 6) if USERNAMES_6_URL else []
-            section_7 = await build_username_section(browser, USERNAMES_7_URL, 7) if USERNAMES_7_URL else []
-
-            number_floor = await fetch_numbers_floor(browser, NUMBERS_URL, ton_usd_rate) if NUMBERS_URL else {"has4": None, "no4": None}
-        finally:
-            await browser.close()
-
-    usernames_text = build_usernames_message(section_5, section_6, section_7, ton_usd_rate)
     numbers_text = build_numbers_message(number_floor, ton_usd_rate) if NUMBERS_URL else None
     promo_text = build_promo_message_html()
     promo_reply_markup = build_promo_reply_markup()
 
     await verify_telegram_bot()
-
-    usernames_update_error = await update_required_message(
-        USERNAMES_CHAT_ID,
-        USERNAMES_MESSAGE_ID,
-        usernames_text,
-        "USERNAMES_MESSAGE_ID",
-        parse_mode="HTML",
-    )
 
     if numbers_text:
         await upsert_message(
@@ -2025,8 +2046,18 @@ async def main():
         reply_markup=promo_reply_markup,
     )
 
-    if usernames_update_error:
-        raise RuntimeError(usernames_update_error)
+
+
+async def main():
+    if RUN_MODE == "online":
+        await update_online_only()
+        return
+    if RUN_MODE == "usernames":
+        await update_usernames_only()
+        return
+
+    await update_usernames_only()
+    await update_online_only()
 
 
 if __name__ == "__main__":
